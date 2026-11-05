@@ -556,6 +556,16 @@ set(DSView_RESOURCES
 
 
 if(WIN32)
+	# Native Windows frame and shadow implementation.
+	list(APPEND DSView_SOURCES
+		DSView/pv/winnativewidget.cpp
+		DSView/pv/winshadow.cpp
+	)
+	list(APPEND DSView_HEADERS
+		DSView/pv/winnativewidget.h
+		DSView/pv/winshadow.h
+	)
+
 	# Use the DSView icon for the DSView.exe executable.
 	set(CMAKE_RC_COMPILE_OBJECT "${CMAKE_RC_COMPILER} -O coff -I${CMAKE_CURRENT_SOURCE_DIR} <SOURCE> <OBJECT>")
 	enable_language(RC)
