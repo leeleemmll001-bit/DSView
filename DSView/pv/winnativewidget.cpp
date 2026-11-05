@@ -140,10 +140,10 @@ WinNativeWidget::WinNativeWidget(const int x, const int y, const int width,
     int b = backColor.blue();
 
     HINSTANCE hInstance = GetModuleHandle(nullptr);
-    WNDCLASSEX wcx;
-    memset(&wcx, 0, sizeof(WNDCLASSEXW));
+    WNDCLASSEXW wcx;
+    memset(&wcx, 0, sizeof(wcx));
 
-    wcx.cbSize = sizeof(WNDCLASSEX);
+    wcx.cbSize = sizeof(wcx);
     wcx.style = CS_HREDRAW | CS_VREDRAW;
     wcx.hInstance = hInstance;
     wcx.lpfnWndProc = WndProc;
@@ -153,8 +153,9 @@ WinNativeWidget::WinNativeWidget(const int x, const int y, const int width,
     wcx.hCursor = LoadCursor(hInstance, IDC_ARROW);
     wcx.hbrBackground = CreateSolidBrush(RGB(r, g, b));
  
-    RegisterClassEx(&wcx);
-    if (FAILED(RegisterClassEx(&wcx)))
+    SetLastError(ERROR_SUCCESS);
+    if (RegisterClassExW(&wcx) == 0 &&
+        GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
     {
         dsv_info("ERROR: can't register window class");
         assert(false);
