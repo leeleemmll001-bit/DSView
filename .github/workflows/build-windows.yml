@@ -45,7 +45,8 @@ jobs:
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_PREFIX_PATH="$MINGW_PREFIX" \
-            -DPKG_CONFIG_EXECUTABLE="$MINGW_PREFIX/bin/pkg-config.exe"
+            -DPKG_CONFIG_EXECUTABLE="$MINGW_PREFIX/bin/pkg-config.exe" \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5
 
       - name: Build
         run: cmake --build build --parallel 2
