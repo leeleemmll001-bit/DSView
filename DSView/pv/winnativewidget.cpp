@@ -68,7 +68,7 @@ namespace
 
 static bool InitCapturePowerEvent(HWND hWnd)
 {
-    g_hUser32 = LoadLibrary(L"user32.dll");
+    g_hUser32 = LoadLibraryW(L"user32.dll");
     if (g_hUser32 == NULL) {
         dsv_info("ERROR: Failed to load user32.dll");
         return false;
@@ -160,7 +160,7 @@ WinNativeWidget::WinNativeWidget(const int x, const int y, const int width,
         assert(false);
     }
  
-    _hWnd = CreateWindow(L"DSViewWindowClass", L"DSView",
+    _hWnd = CreateWindowW(L"DSViewWindowClass", L"DSView",
             //WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_THICKFRAME | WS_CLIPCHILDREN,
             WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_CLIPSIBLINGS, 
             x, y, width, height,
