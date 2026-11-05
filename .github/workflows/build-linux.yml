@@ -1,0 +1,65 @@
+name: DSView Linux Build
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-linux:
+    name: Ubuntu 22.04 x86_64
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            pkg-config \
+            qtbase5-dev \
+            qttools5-dev-tools \
+            libglib2.0-dev \
+            zlib1g-dev \
+            libusb-1.0-0-dev \
+            libboost-dev \
+            libfftw3-dev \
+            python3-dev \
+            libudev-dev
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel 2
+
+      - name: Verify executable
+        run: |
+          test -x build.dir/DSView
+          file build.dir/DSView
+
+      - name: Install into staging directory
+        run: |
+          DESTDIR="$GITHUB_WORKSPACE/package-root" cmake --install build
+
+      - name: Package Linux build
+        run: |
+          tar -czf DSView-linux-x86_64.tar.gz -C package-root .
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: DSView-linux-x86_64
+          path: |
+            build.dir/DSView
+            DSView-linux-x86_64.tar.gz
+          if-no-files-found: error
+          retention-days: 14
