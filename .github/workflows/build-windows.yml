@@ -34,7 +34,7 @@ jobs:
             mingw-w64-x86_64-pkgconf
             mingw-w64-x86_64-qt5-base
             mingw-w64-x86_64-glib2
-            mingw-w64-x86_64-libusb
+            mingw-w64-x86_64-libusb1
             mingw-w64-x86_64-boost
             mingw-w64-x86_64-fftw
             mingw-w64-x86_64-python
