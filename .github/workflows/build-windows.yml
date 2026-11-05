@@ -1,0 +1,87 @@
+name: DSView Windows Build
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    name: Windows 10/11 x64 (MinGW-w64)
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up MSYS2 and install dependencies
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-qt5-base
+            mingw-w64-x86_64-glib2
+            mingw-w64-x86_64-libusb
+            mingw-w64-x86_64-boost
+            mingw-w64-x86_64-fftw
+            mingw-w64-x86_64-python
+            mingw-w64-x86_64-zlib
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$MINGW_PREFIX" \
+            -DPKG_CONFIG_EXECUTABLE="$MINGW_PREFIX/bin/pkg-config.exe"
+
+      - name: Build
+        run: cmake --build build --parallel 2
+
+      - name: Verify executable
+        run: |
+          test -f build.dir/DSView.exe
+          file build.dir/DSView.exe
+
+      - name: Stage application and Qt runtime
+        run: |
+          cmake --install build --prefix "$PWD/stage"
+          mkdir -p stage/bin
+          cp build.dir/DSView.exe stage/bin/
+          "$MINGW_PREFIX/bin/windeployqt.exe" --release --compiler-runtime stage/bin/DSView.exe
+
+      - name: Bundle MinGW runtime DLLs
+        run: |
+          ldd stage/bin/DSView.exe | awk '$2 == "=>" && $3 ~ /^\\// {print $3}' | sort -u > runtime-dlls.txt
+          while IFS= read -r dll; do
+            [ -f "$dll" ] && cp -n "$dll" stage/bin/
+          done < runtime-dlls.txt
+          # Keep application data and decoder definitions beside the executable.
+          mkdir -p stage/share/DSView
+          cp -r DSView/res DSView/demo lang stage/share/DSView/
+          cp -r libsigrokdecode4DSL/decoders stage/share/libsigrokdecode4DSL/
+
+      - name: Package Windows x64 build
+        shell: pwsh
+        run: |
+          Compress-Archive -Path stage/* -DestinationPath DSView-windows-x86_64.zip -Force
+
+      - name: Upload Windows build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DSView-windows-x86_64
+          path: DSView-windows-x86_64.zip
+          if-no-files-found: error
+          retention-days: 14
