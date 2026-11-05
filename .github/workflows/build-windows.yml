@@ -33,6 +33,7 @@ jobs:
             mingw-w64-ucrt-x86_64-ninja
             mingw-w64-ucrt-x86_64-pkgconf
             mingw-w64-ucrt-x86_64-qt5-base
+            mingw-w64-ucrt-x86_64-qt5-tools
             mingw-w64-ucrt-x86_64-qt5-winextras
             mingw-w64-ucrt-x86_64-glib2
             mingw-w64-ucrt-x86_64-libusb
@@ -62,7 +63,7 @@ jobs:
           cmake --install build --prefix "$PWD/stage"
           mkdir -p stage/bin
           cp build.dir/DSView.exe stage/bin/
-          "$MINGW_PREFIX/bin/windeployqt.exe" --release --compiler-runtime stage/bin/DSView.exe
+          "$MINGW_PREFIX/bin/windeployqt-qt5.exe" --release --compiler-runtime stage/bin/DSView.exe
 
       - name: Bundle MinGW runtime DLLs
         run: |
