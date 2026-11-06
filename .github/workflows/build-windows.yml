@@ -68,6 +68,15 @@ jobs:
 
       - name: Bundle MinGW runtime DLLs
         run: |
+          # Explicitly include GCC runtime DLLs required by MinGW-built executables.
+          for dll in libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll; do
+            if [[ -f "$MINGW_PREFIX/bin/$dll" ]]; then
+              cp -n "$MINGW_PREFIX/bin/$dll" stage/bin/
+            else
+              echo "Missing MinGW runtime DLL: $MINGW_PREFIX/bin/$dll"
+              exit 1
+            fi
+          done
           ldd stage/bin/DSView.exe > runtime-deps.txt
           while read -r library arrow dll address; do
             if [[ "$arrow" == "=>" && "$dll" == /* && -f "$dll" ]]; then
