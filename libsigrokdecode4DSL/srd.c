@@ -24,6 +24,11 @@
 #include <glib.h>
 #include "log.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#include <wchar.h>
+#endif
+
 /** @cond PRIVATE */
 
 /* Python module search paths */
