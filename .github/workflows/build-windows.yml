@@ -140,6 +140,17 @@ jobs:
             exit 1
           fi
           echo "Checking Python extension dependencies: $ctypes_module"
+          # The MSYS2 ldd utility does not report dependencies for this PE .pyd
+          # reliably. _ctypes is linked against libffi, so bundle it explicitly.
+          if [[ -f "$MINGW_PREFIX/bin/libffi-8.dll" ]]; then
+            cp -Lf "$MINGW_PREFIX/bin/libffi-8.dll" stage/bin/
+            echo "Bundled _ctypes dependency: $MINGW_PREFIX/bin/libffi-8.dll"
+          else
+            echo "Required _ctypes dependency libffi-8.dll was not found"
+            find "$MINGW_PREFIX" -iname '*ffi*.dll' -print
+            exit 1
+          fi
+          test -f stage/bin/libffi-8.dll
           while read -r library arrow dll address; do
             if [[ "$arrow" == "=>" && "$dll" == "$MINGW_PREFIX/"* && -f "$dll" ]]; then
               cp -n "$dll" stage/bin/
