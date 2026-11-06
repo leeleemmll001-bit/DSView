@@ -487,6 +487,7 @@ set(libsigrok4DSL_SOURCES
     libsigrok4DSL/hardware/DSL/dscope.c
     libsigrok4DSL/hardware/DSL/command.c
     libsigrok4DSL/hardware/DSL/dsl.c
+    libsigrok4DSL/hardware/gd32la/gd32la.c
     libsigrok4DSL/lib_main.c
 )
 
@@ -497,6 +498,7 @@ set(libsigrok4DSL_HEADERS
     libsigrok4DSL/config.h
     libsigrok4DSL/hardware/DSL/command.h
     libsigrok4DSL/hardware/DSL/dsl.h
+    libsigrok4DSL/hardware/gd32la/gd32la.h
 )
  
 #===============================================================================
