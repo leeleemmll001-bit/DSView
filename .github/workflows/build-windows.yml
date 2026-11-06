@@ -100,22 +100,21 @@ jobs:
           test -f stage/bin/libwinpthread-1.dll
           test -f stage/bin/libglib-2.0-0.dll
           # CMake may select the hosted Windows Python rather than MSYS2 Python.
-          # Use the exact import library selected at configure time to locate the
-          # matching CPython DLL (e.g. python315.dll); never mix Python ABIs.
-          python_lib="$(sed -nE 's/^Python3_LIBRARY_RELEASE(:[^=]+)?=(.*)$/\\2/p' build/CMakeCache.txt | head -n 1)"
+          # Derive the exact ABI from the import library in CMakeCache, then search
+          # the hosted toolcache for the matching runtime DLL.
+          python_lib="$(awk -F= '/^Python3_LIBRARY_RELEASE(:[^=]+)?=/ {print $NF; exit} /^Python3_LIBRARY(:[^=]+)?=/ {fallback=$NF} END {if (!found && fallback != "") print fallback}' build/CMakeCache.txt)"
           if [[ -z "$python_lib" ]]; then
-            python_lib="$(sed -nE 's/^Python3_LIBRARY(:[^=]+)?=(.*)$/\\2/p' build/CMakeCache.txt | head -n 1)"
-          fi
-          if [[ -z "$python_lib" ]]; then
-            echo "Could not determine the Python import library selected by CMake"
-            grep -E '^Python3_.*(LIBRARY|LIBRARIES)' build/CMakeCache.txt || true
+            python_lib="$(grep -E '^Python3_.*(LIBRARY|LIBRARIES)' build/CMakeCache.txt || true)"
+            echo "Could not determine the Python import library selected by CMake:"
+            echo "$python_lib"
             exit 1
           fi
-          python_root="$(dirname "$(dirname "$python_lib")")"
-          python_dll="$(find "$python_root" -maxdepth 2 -type f -iname 'python3*.dll' -print -quit)"
+          python_lib="$(cygpath -u "$python_lib" 2>/dev/null || printf '%s' "$python_lib")"
+          python_dll_name="$(basename "${python_lib%.*}.dll")"
+          python_dll="$(find /c/hostedtoolcache/windows/Python "$MINGW_PREFIX/bin" -type f -iname "$python_dll_name" -print -quit 2>/dev/null)"
           if [[ -z "$python_dll" ]]; then
-            echo "Could not find the Python runtime DLL beside $python_lib"
-            find "$python_root" -maxdepth 2 -type f -iname '*python*.dll' -print || true
+            echo "Could not find matching Python runtime DLL: $python_dll_name"
+            find /c/hostedtoolcache/windows/Python -maxdepth 5 -type f -iname 'python*.dll' -print 2>/dev/null || true
             exit 1
           fi
           cp -n "$python_dll" stage/bin/
