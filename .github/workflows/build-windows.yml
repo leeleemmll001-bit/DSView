@@ -99,26 +99,26 @@ jobs:
           test -f stage/bin/libstdc++-6.dll
           test -f stage/bin/libwinpthread-1.dll
           test -f stage/bin/libglib-2.0-0.dll
-          # CMake may select the hosted Windows Python rather than MSYS2 Python.
-          # Derive the exact ABI from the import library in CMakeCache, then search
-          # the hosted toolcache for the matching runtime DLL.
-          python_lib="$(awk -F= '/^Python3_LIBRARY_RELEASE(:[^=]+)?=/ {print $NF; exit} /^Python3_LIBRARY(:[^=]+)?=/ {fallback=$NF} END {if (!found && fallback != "") print fallback}' build/CMakeCache.txt)"
-          if [[ -z "$python_lib" ]]; then
-            python_lib="$(grep -E '^Python3_.*(LIBRARY|LIBRARIES)' build/CMakeCache.txt || true)"
-            echo "Could not determine the Python import library selected by CMake:"
-            echo "$python_lib"
+          # CMake selected the hosted Windows Python (3.15.2 in the current runner).
+          # Its import library is reported by CMake, but is not consistently cached
+          # under Python3_LIBRARY_*; stage the runtime DLLs from the hosted toolcache.
+          python_dlls=()
+          while IFS= read -r dll; do
+            [[ -n "$dll" ]] && python_dlls+=("$dll")
+          done < <(find /c/hostedtoolcache/windows/Python -type f -iname 'python3*.dll' -print 2>/dev/null)
+          if (( ${#python_dlls[@]} == 0 )); then
+            echo "No CPython runtime DLLs found in the hosted Windows Python toolcache"
+            find /c/hostedtoolcache/windows/Python -maxdepth 6 -type f -iname '*.dll' -print 2>/dev/null | head -n 50 || true
             exit 1
           fi
-          python_lib="$(cygpath -u "$python_lib" 2>/dev/null || printf '%s' "$python_lib")"
-          python_dll_name="$(basename "${python_lib%.*}.dll")"
-          python_dll="$(find /c/hostedtoolcache/windows/Python "$MINGW_PREFIX/bin" -type f -iname "$python_dll_name" -print -quit 2>/dev/null)"
-          if [[ -z "$python_dll" ]]; then
-            echo "Could not find matching Python runtime DLL: $python_dll_name"
-            find /c/hostedtoolcache/windows/Python -maxdepth 5 -type f -iname 'python*.dll' -print 2>/dev/null || true
-            exit 1
+          for dll in "${python_dlls[@]}"; do
+            cp -n "$dll" stage/bin/
+            echo "Bundled Python runtime: $dll"
+          done
+          # Confirm the ABI selected by CMake (python315.lib) has its matching DLL.
+          if grep -q 'Python 3.15' build/CMakeCache.txt 2>/dev/null; then
+            test -f stage/bin/python315.dll
           fi
-          cp -n "$python_dll" stage/bin/
-          echo "Bundled Python runtime: $python_dll"
           # Keep application data and decoder definitions beside the executable.
           mkdir -p stage/share/DSView
           cp -r DSView/res DSView/demo lang stage/share/DSView/
