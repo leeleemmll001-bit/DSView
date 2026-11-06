@@ -208,20 +208,43 @@ SR_PRIV int sr_session_run(void)
 
 	/* Do we have real sources? */
 	if (session->num_sources == 1 && session->pollfds[0].fd == -1) {
-		/* Dummy source, freewheel over it. */
-        while (session->num_sources) {
-            if (session->abort_session) {
-                session->sources[0].cb(-1, -1, session->sources[0].cb_data);
-                break;
-            } else {
-                session->sources[0].cb(-1, 0, session->sources[0].cb_data);
-                /* Sources without a pollable fd (e.g. the DSL usb drivers on
-                 * Windows, where libusb_get_pollfds() returns NULL) ask for a
-                 * timeout: honour it instead of spinning at 100% cpu. */
-                if (session->num_sources && session->source_timeout > 0)
-                    g_usleep((gulong)session->source_timeout * 1000);
-            }
-        }
+		/* Source without a pollable fd: the DSL usb drivers register one on
+		 * Windows, where libusb_get_pollfds() returns NULL. The callbacks are
+		 * driven by the source timeout, and the driver removes the source once
+		 * it has flushed SR_DF_END. Keep pumping after a stop request too,
+		 * otherwise the pending usb transfers are never completed, SR_DF_END
+		 * never reaches the session and the tail of the capture is lost. */
+		int abort_ticks = -1;
+		while (session->num_sources) {
+			session->sources[0].cb(-1, 0, session->sources[0].cb_data);
+
+			g_mutex_lock(&session->stop_mutex);
+			if (session->abort_session) {
+				sr_info("Collection task aborted.");
+				current_device_acquisition_stop();
+				/* But once is enough. */
+				session->abort_session = FALSE;
+				/* Grace period (~2s at the 20ms DSL tick) for the
+				 * driver to complete the outstanding transfers. */
+				abort_ticks = 100;
+			}
+			g_mutex_unlock(&session->stop_mutex);
+
+			if (!session->num_sources)
+				break;
+
+			if (abort_ticks >= 0 && --abort_ticks <= 0) {
+				sr_err("%s: timed out waiting for the driver to finish "
+				       "the acquisition.", __func__);
+				session->sources[0].cb(-1, -1, session->sources[0].cb_data);
+				break;
+			}
+
+			/* Honour the request of sources without a pollable fd instead
+			 * of spinning at 100% cpu. */
+			if (session->source_timeout > 0)
+				g_usleep((gulong)session->source_timeout * 1000);
+		}
 	} else {
 		/* Real sources, use g_poll() main loop. */
         while (session->num_sources){

@@ -2078,16 +2078,26 @@ namespace pv
             break;
 
         case DS_EV_DEVICE_STOPPED:
+        {
             _device_status = ST_STOPPED;
-            // Confirm that SR_DF_END was received
-            if (   !_capture_data->get_logic()->last_ended() 
-                || !_capture_data->get_dso()->last_ended()
-                || !_capture_data->get_analog()->last_ended())
+            // Confirm that SR_DF_END was received. Only the snapshot of the
+            // active work mode can ever see SR_DF_END; the other two stay
+            // untouched for the whole run, so checking all three fired on
+            // every single stop of a logic capture.
+            const int mode = _device_agent.get_work_mode();
+            const bool ended = (mode == ANALOG)
+                ? _capture_data->get_analog()->last_ended()
+                : (mode == DSO)
+                    ? _capture_data->get_dso()->last_ended()
+                    : _capture_data->get_logic()->last_ended();
+            if (!ended)
             {
                 dsv_err("Error!The data is not completed.");
-                assert(false);
+                // Reported through the log only: aborting the process with a
+                // modal CRT assertion is worse than a truncated capture.
             }
             break;
+        }
 
         case DS_EV_COLLECT_TASK_START:
             _callback->trigger_message(DSV_MSG_COLLECT_START);
