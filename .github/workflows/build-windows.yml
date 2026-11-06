@@ -68,10 +68,12 @@ jobs:
 
       - name: Bundle MinGW runtime DLLs
         run: |
-          ldd stage/bin/DSView.exe | awk '$2 == "=>" && $3 ~ /^\\// {print $3}' | sort -u > runtime-dlls.txt
-          while IFS= read -r dll; do
-            [ -f "$dll" ] && cp -n "$dll" stage/bin/
-          done < runtime-dlls.txt
+          ldd stage/bin/DSView.exe > runtime-deps.txt
+          while read -r library arrow dll address; do
+            if [[ "$arrow" == "=>" && "$dll" == /* && -f "$dll" ]]; then
+              cp -n "$dll" stage/bin/
+            fi
+          done < runtime-deps.txt
           # Keep application data and decoder definitions beside the executable.
           mkdir -p stage/share/DSView
           cp -r DSView/res DSView/demo lang stage/share/DSView/
