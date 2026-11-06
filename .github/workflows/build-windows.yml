@@ -131,10 +131,34 @@ jobs:
           cp -r "$python_stdlib_dir" stage/lib/
           test -f "stage/lib/$(basename "$python_stdlib_dir")/encodings/__init__.py"
           echo "Bundled Python standard library: $python_stdlib_dir"
-          # Keep application data and decoder definitions beside the executable.
-          mkdir -p stage/share/DSView
-          cp -r DSView/res DSView/demo lang stage/share/DSView/
+          # Python extension modules (.pyd) also have DLL dependencies.
+          # ldd on DSView.exe alone does not discover dependencies loaded later
+          # by ctypes, so explicitly walk the _ctypes extension dependency tree.
+          ctypes_module="$(find "$python_stdlib_dir" -type f -iname '_ctypes*.pyd' -print -quit)"
+          if [[ -z "$ctypes_module" ]]; then
+            echo "Python _ctypes extension module not found"
+            exit 1
+          fi
+          echo "Checking Python extension dependencies: $ctypes_module"
+          while read -r library arrow dll address; do
+            if [[ "$arrow" == "=>" && "$dll" == "$MINGW_PREFIX/"* && -f "$dll" ]]; then
+              cp -n "$dll" stage/bin/
+              echo "Bundled Python extension dependency: $dll"
+              while read -r dep_library dep_arrow dep_dll dep_address; do
+                if [[ "$dep_arrow" == "=>" && "$dep_dll" == "$MINGW_PREFIX/"* && -f "$dep_dll" ]]; then
+                  cp -n "$dep_dll" stage/bin/
+                  echo "Bundled transitive dependency: $dep_dll"
+                fi
+              done < <(ldd "$dll" 2>/dev/null || true)
+            fi
+          done < <(ldd "$ctypes_module" 2>/dev/null || true)
+          # Keep application data and decoder definitions at the paths
+          # expected by the application: language files are relative to bin.
+          mkdir -p stage/share/DSView stage/bin
+          cp -r DSView/res DSView/demo stage/share/DSView/
+          cp -r lang stage/bin/lang
           cp -r libsigrokdecode4DSL/decoders stage/share/libsigrokdecode4DSL/
+          test -f stage/bin/lang/cn/toolbar.json
 
       - name: Package Windows x64 build
         shell: pwsh
