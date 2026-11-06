@@ -209,8 +209,29 @@ SRD_API int srd_init(const char *path)
 	/* Add our own module to the list of built-in modules. */
 	PyImport_AppendInittab("sigrokdecode", PyInit_sigrokdecode);
 
+	/* On Windows, use the bundled Python standard library next to the app.
+	 * The build machine's absolute MSYS2 path is not valid on end-user PCs.
+	 */
+#ifdef _WIN32
+	{
+		static wchar_t python_home[MAX_PATH];
+		DWORD path_len = GetModuleFileNameW(NULL, python_home, MAX_PATH);
+		if (path_len > 0 && path_len < MAX_PATH) {
+			wchar_t *p = wcsrchr(python_home, L'\\');
+			if (p) {
+				*p = L'\0'; /* .../bin */
+				p = wcsrchr(python_home, L'\\');
+				if (p) {
+					*p = L'\0'; /* application root */
+					srd_set_python_home(python_home);
+				}
+			}
+		}
+	}
+#endif
+
 	/* Initialize the Python interpreter. */
-    Py_InitializeEx(0); 
+	Py_InitializeEx(0);
 
 #ifdef DECODERS_DIR
 	/* Hardcoded decoders install location, if defined. */
