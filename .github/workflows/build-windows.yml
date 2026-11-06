@@ -120,6 +120,17 @@ jobs:
           done
           echo "Python selected by CMake:"
           grep -Ei 'Python3?_(EXECUTABLE|LIBRARY|INCLUDE)' build/CMakeCache.txt || true
+          # Bundle the matching MSYS2 Python standard library. Python 3.14
+          # expects this under <python-home>/lib/python3.14 on Windows.
+          python_stdlib_dir="$(find "$MINGW_PREFIX/lib" -maxdepth 1 -type d -name 'python3.*' | sort | tail -n 1)"
+          if [[ -z "$python_stdlib_dir" || ! -d "$python_stdlib_dir/encodings" ]]; then
+            echo "Python standard library (encodings) not found under $MINGW_PREFIX/lib"
+            exit 1
+          fi
+          mkdir -p stage/lib
+          cp -r "$python_stdlib_dir" stage/lib/
+          test -f "stage/lib/$(basename "$python_stdlib_dir")/encodings/__init__.py"
+          echo "Bundled Python standard library: $python_stdlib_dir"
           # Keep application data and decoder definitions beside the executable.
           mkdir -p stage/share/DSView
           cp -r DSView/res DSView/demo lang stage/share/DSView/
