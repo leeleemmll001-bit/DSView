@@ -1316,10 +1316,17 @@ static void remove_sources(struct DSL_context *devc)
 {
     int i;
     sr_info("%s: remove fds from polling", __func__);
+#ifdef _WIN32
+    /* Windows has no pollable usb fds: the single timeout driven source
+     * registered in dev_acquisition_start() is identified by fd -1. */
+    sr_source_remove(-1);
+#else
     /* Remove fds from polling. */
     for (i = 0; devc->usbfd[i] != -1; i++)
         sr_source_remove(devc->usbfd[i]);
+#endif
     g_free(devc->usbfd);
+    devc->usbfd = NULL;
 }
 
 static void report_overflow(struct DSL_context *devc)
@@ -1486,6 +1493,22 @@ static int dev_acquisition_start(struct sr_dev_inst *sdi, void *cb_data)
     }
 
     /* setup callback function for data transfer */
+#ifdef _WIN32
+    /*
+     * libusb_get_pollfds() always returns NULL on Windows ("As file
+     * descriptors are a Unix-specific concept, this function is not
+     * available on Windows"), so it must not be dereferenced here.
+     * Drive the usb event handling from a timeout based source instead;
+     * receive_data() already calls libusb_handle_events_timeout_completed().
+     */
+    if (!(devc->usbfd = g_try_malloc0(sizeof(int) * 2))){
+        sr_err("%s,ERROR:failed to alloc memory.", __func__);
+        return SR_ERR_MALLOC;
+    }
+    devc->usbfd[0] = -1;
+    devc->usbfd[1] = -1;
+    sr_source_add(-1, 0, dsl_get_timeout(sdi), receive_data, sdi);
+#else
     lupfd = libusb_get_pollfds(drvc->sr_ctx->libusb_ctx);
     for (i = 0; lupfd[i]; i++);
 
@@ -1500,7 +1523,8 @@ static int dev_acquisition_start(struct sr_dev_inst *sdi, void *cb_data)
         devc->usbfd[i] = lupfd[i]->fd;
     }
     devc->usbfd[i] = -1;
-    g_free(lupfd);
+    libusb_free_pollfds(lupfd);
+#endif
 
     wr_cmd.header.dest = DSL_CTL_START;
     wr_cmd.header.size = 0;

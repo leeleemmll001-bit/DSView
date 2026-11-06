@@ -215,6 +215,11 @@ SR_PRIV int sr_session_run(void)
                 break;
             } else {
                 session->sources[0].cb(-1, 0, session->sources[0].cb_data);
+                /* Sources without a pollable fd (e.g. the DSL usb drivers on
+                 * Windows, where libusb_get_pollfds() returns NULL) ask for a
+                 * timeout: honour it instead of spinning at 100% cpu. */
+                if (session->num_sources && session->source_timeout > 0)
+                    g_usleep((gulong)session->source_timeout * 1000);
             }
         }
 	} else {
