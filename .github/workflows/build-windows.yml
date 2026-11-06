@@ -108,13 +108,14 @@ jobs:
           python_dlls=()
           while IFS= read -r dll; do
             [[ -n "$dll" ]] && python_dlls+=("$dll")
-          done < <(find "$MINGW_PREFIX/bin" -maxdepth 1 -type f -iname 'python*.dll' -print)
+          done < <(find "$MINGW_PREFIX/bin" -maxdepth 1 \( -type f -o -type l \) -iname 'python*.dll' -print)
           if (( ${#python_dlls[@]} == 0 )); then
             echo "No MSYS2 Python runtime DLLs found under $MINGW_PREFIX/bin"
+            ls -la "$MINGW_PREFIX/bin/"*python* 2>/dev/null || true
             exit 1
           fi
           for dll in "${python_dlls[@]}"; do
-            cp -f "$dll" stage/bin/
+            cp -Lf "$dll" stage/bin/
             echo "Bundled MSYS2 Python runtime: $dll"
           done
           echo "Python selected by CMake:"
