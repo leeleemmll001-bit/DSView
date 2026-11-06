@@ -99,15 +99,27 @@ jobs:
           test -f stage/bin/libstdc++-6.dll
           test -f stage/bin/libwinpthread-1.dll
           test -f stage/bin/libglib-2.0-0.dll
-          # Python is loaded by the sigrokdecode integration at runtime; its DLL
-          # may be loaded dynamically and therefore is not always visible to ldd.
-          shopt -s nullglob
-          python_dlls=("$MINGW_PREFIX"/bin/python*.dll)
-          if (( ${#python_dlls[@]} == 0 )); then
-            echo "No Python runtime DLL found in $MINGW_PREFIX/bin"
+          # CMake may select the hosted Windows Python rather than MSYS2 Python.
+          # Use the exact import library selected at configure time to locate the
+          # matching CPython DLL (e.g. python315.dll); never mix Python ABIs.
+          python_lib="$(sed -nE 's/^Python3_LIBRARY_RELEASE(:[^=]+)?=(.*)$/\\2/p' build/CMakeCache.txt | head -n 1)"
+          if [[ -z "$python_lib" ]]; then
+            python_lib="$(sed -nE 's/^Python3_LIBRARY(:[^=]+)?=(.*)$/\\2/p' build/CMakeCache.txt | head -n 1)"
+          fi
+          if [[ -z "$python_lib" ]]; then
+            echo "Could not determine the Python import library selected by CMake"
+            grep -E '^Python3_.*(LIBRARY|LIBRARIES)' build/CMakeCache.txt || true
             exit 1
           fi
-          cp -n "${python_dlls[@]}" stage/bin/
+          python_root="$(dirname "$(dirname "$python_lib")")"
+          python_dll="$(find "$python_root" -maxdepth 2 -type f -iname 'python3*.dll' -print -quit)"
+          if [[ -z "$python_dll" ]]; then
+            echo "Could not find the Python runtime DLL beside $python_lib"
+            find "$python_root" -maxdepth 2 -type f -iname '*python*.dll' -print || true
+            exit 1
+          fi
+          cp -n "$python_dll" stage/bin/
+          echo "Bundled Python runtime: $python_dll"
           # Keep application data and decoder definitions beside the executable.
           mkdir -p stage/share/DSView
           cp -r DSView/res DSView/demo lang stage/share/DSView/
