@@ -77,12 +77,28 @@ jobs:
               exit 1
             fi
           done
-          ldd stage/bin/DSView.exe > runtime-deps.txt
-          while read -r library arrow dll address; do
-            if [[ "$arrow" == "=>" && "$dll" == /* && -f "$dll" ]]; then
-              cp -n "$dll" stage/bin/
-            fi
-          done < runtime-deps.txt
+          # Recursively bundle dependencies of the executable and all deployed DLLs.
+          declare -A seen
+          queue=(stage/bin/DSView.exe)
+          index=0
+          while (( index < ${#queue[@]} )); do
+            current="${queue[$index]}"
+            ((index+=1))
+            while read -r library arrow dll address; do
+              if [[ "$arrow" == "=>" && "$dll" == "$MINGW_PREFIX/"* && -f "$dll" ]]; then
+                name="$(basename "$dll")"
+                if [[ -z "${seen[$name]+x}" ]]; then
+                  seen[$name]=1
+                  cp -n "$dll" "stage/bin/$name"
+                  queue+=("stage/bin/$name")
+                fi
+              fi
+            done < <(ldd "$current" 2>/dev/null || true)
+          done
+          test -f stage/bin/libgcc_s_seh-1.dll
+          test -f stage/bin/libstdc++-6.dll
+          test -f stage/bin/libwinpthread-1.dll
+          test -f stage/bin/libglib-2.0-0.dll
           # Keep application data and decoder definitions beside the executable.
           mkdir -p stage/share/DSView
           cp -r DSView/res DSView/demo lang stage/share/DSView/
