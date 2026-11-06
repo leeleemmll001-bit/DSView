@@ -33,6 +33,7 @@ jobs:
             mingw-w64-ucrt-x86_64-ninja
             mingw-w64-ucrt-x86_64-pkgconf
             mingw-w64-ucrt-x86_64-qt5-base
+            mingw-w64-ucrt-x86_64-qt5-svg
             mingw-w64-ucrt-x86_64-angleproject
             mingw-w64-ucrt-x86_64-qt5-tools
             mingw-w64-ucrt-x86_64-qt5-winextras
@@ -69,6 +70,27 @@ jobs:
           mkdir -p stage/bin
           cp build.dir/DSView.exe stage/bin/
           "$MINGW_PREFIX/bin/windeployqt-qt5.exe" --release --compiler-runtime stage/bin/DSView.exe
+          # DSView ships every icon and all theme artwork as SVG (209 .svg files in
+          # the qrc, 76 `url(:/...)` references in themes/dark.qss). Qt decodes them
+          # only through the SVG plugins from qt5-svg, which windeployqt does not
+          # copy because DSView.exe does not import Qt5Svg directly. Without them
+          # every toolbar icon, checkbox indicator and window button renders blank.
+          svg_plugin_dir="$MINGW_PREFIX/share/qt5/plugins"
+          mkdir -p stage/bin/imageformats stage/bin/iconengines
+          for f in "$MINGW_PREFIX/bin/Qt5Svg.dll" \
+                   "$svg_plugin_dir/imageformats/qsvg.dll" \
+                   "$svg_plugin_dir/iconengines/qsvgicon.dll"; do
+            if [[ ! -f "$f" ]]; then
+              echo "Missing Qt SVG runtime: $f"
+              exit 1
+            fi
+            case "$f" in
+              */imageformats/*) cp -f "$f" stage/bin/imageformats/ ;;
+              */iconengines/*)  cp -f "$f" stage/bin/iconengines/ ;;
+              *)                cp -f "$f" stage/bin/ ;;
+            esac
+            echo "Bundled Qt SVG runtime: $f"
+          done
 
       - name: Bundle MinGW runtime DLLs
         run: |
