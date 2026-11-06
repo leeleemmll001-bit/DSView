@@ -99,6 +99,15 @@ jobs:
           test -f stage/bin/libstdc++-6.dll
           test -f stage/bin/libwinpthread-1.dll
           test -f stage/bin/libglib-2.0-0.dll
+          # Python is loaded by the sigrokdecode integration at runtime; its DLL
+          # may be loaded dynamically and therefore is not always visible to ldd.
+          shopt -s nullglob
+          python_dlls=("$MINGW_PREFIX"/bin/python*.dll)
+          if (( ${#python_dlls[@]} == 0 )); then
+            echo "No Python runtime DLL found in $MINGW_PREFIX/bin"
+            exit 1
+          fi
+          cp -n "${python_dlls[@]}" stage/bin/
           # Keep application data and decoder definitions beside the executable.
           mkdir -p stage/share/DSView
           cp -r DSView/res DSView/demo lang stage/share/DSView/
