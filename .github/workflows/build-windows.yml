@@ -49,6 +49,10 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_PREFIX_PATH="$MINGW_PREFIX" \
             -DPKG_CONFIG_EXECUTABLE="$MINGW_PREFIX/bin/pkg-config.exe" \
+            -DPython3_ROOT_DIR="$MINGW_PREFIX" \
+            -DPython3_EXECUTABLE="$MINGW_PREFIX/bin/python.exe" \
+            -DPython3_FIND_STRATEGY=LOCATION \
+            -DPython_ROOT_DIR="$MINGW_PREFIX" \
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5
 
       - name: Build
@@ -99,26 +103,22 @@ jobs:
           test -f stage/bin/libstdc++-6.dll
           test -f stage/bin/libwinpthread-1.dll
           test -f stage/bin/libglib-2.0-0.dll
-          # CMake selected the hosted Windows Python (3.15.2 in the current runner).
-          # Its import library is reported by CMake, but is not consistently cached
-          # under Python3_LIBRARY_*; stage the runtime DLLs from the hosted toolcache.
+          # Bundle only the 64-bit MSYS2/UCRT Python runtime selected at configure time.
+          # Avoid mixing x86/x64 DLLs or Python DLLs from unrelated hosted-toolcache versions.
           python_dlls=()
           while IFS= read -r dll; do
             [[ -n "$dll" ]] && python_dlls+=("$dll")
-          done < <(find /c/hostedtoolcache/windows/Python -type f -iname 'python3*.dll' -print 2>/dev/null)
+          done < <(find "$MINGW_PREFIX/bin" -maxdepth 1 -type f -iname 'python*.dll' -print)
           if (( ${#python_dlls[@]} == 0 )); then
-            echo "No CPython runtime DLLs found in the hosted Windows Python toolcache"
-            find /c/hostedtoolcache/windows/Python -maxdepth 6 -type f -iname '*.dll' -print 2>/dev/null | head -n 50 || true
+            echo "No MSYS2 Python runtime DLLs found under $MINGW_PREFIX/bin"
             exit 1
           fi
           for dll in "${python_dlls[@]}"; do
-            cp -n "$dll" stage/bin/
-            echo "Bundled Python runtime: $dll"
+            cp -f "$dll" stage/bin/
+            echo "Bundled MSYS2 Python runtime: $dll"
           done
-          # Confirm the ABI selected by CMake (python315.lib) has its matching DLL.
-          if grep -q 'Python 3.15' build/CMakeCache.txt 2>/dev/null; then
-            test -f stage/bin/python315.dll
-          fi
+          echo "Python selected by CMake:"
+          grep -Ei 'Python3?_(EXECUTABLE|LIBRARY|INCLUDE)' build/CMakeCache.txt || true
           # Keep application data and decoder definitions beside the executable.
           mkdir -p stage/share/DSView
           cp -r DSView/res DSView/demo lang stage/share/DSView/
