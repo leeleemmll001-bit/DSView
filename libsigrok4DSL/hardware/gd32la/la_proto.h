@@ -25,10 +25,13 @@
     it with a small buffer before switching to streaming reads. All packets
     that follow the header carry raw sample data only.
 
-    The device has two work modes, selected by the argument of GD32LA_CMD_START:
+    The device has three work modes, selected by the argument of
+    GD32LA_CMD_START:
 
       GD32LA_MODE_LOGIC   2 digital channels, LA_CROSS_DATA layout
       GD32LA_MODE_ANALOG  2 analog channels, 8 bit interleaved samples
+      GD32LA_MODE_MIXED   both of the above in one stream, so the host can
+                          display digital and analog traces side by side
 
     Logic sample layout (LA_CROSS_DATA, same as DreamSourceLab devices)
     -----------------------------------------------------------------
@@ -39,7 +42,8 @@
 
     Inside a block bit 0 is the oldest sample, bit 7 the newest, so one byte
     carries 8 consecutive samples of that channel. One sample group is
-    GD32LA_GROUP_BYTES = 16 bytes.
+    GD32LA_GROUP_BYTES = 16 bytes, which is 8 bytes * 8 samples = 64 samples
+    per channel.
 
     Analog sample layout
     --------------------
@@ -49,6 +53,19 @@
 
     Values are unsigned 8 bit centred on GD32LA_ANALOG_MID (128), which is
     what DSView's analog view expects from a 1 V/div, AC coupled probe.
+
+    Mixed sample layout
+    -------------------
+    One mixed group covers GD32LA_SAMPLES_PER_BYTE (8) samples and is
+    GD32LA_MIXED_GROUP_BYTES (18) bytes long:
+
+      byte 0                 D0, 8 samples, bit 0 oldest
+      byte 1                 D1, 8 samples, bit 0 oldest
+      byte 2 + 2*n + 0       A0 sample n
+      byte 2 + 2*n + 1       A1 sample n
+
+    Digital and analog stay in lockstep, so sample n of every channel of a
+    group belongs to the same instant on the DSView time axis.
 */
 
 #ifndef LA_PROTO_H
@@ -79,9 +96,16 @@
 #define GD32LA_ANALOG_MID              128U
 #define GD32LA_ANALOG_GROUP_BYTES      (GD32LA_ANALOG_CHANNELS * 1U)
 
+/* Mixed group: 8 samples of each digital channel (one byte per channel) plus
+ * 8 interleaved analog sample pairs. */
+#define GD32LA_MIXED_GROUP_BYTES       (GD32LA_CHANNELS + \
+                                        GD32LA_ANALOG_GROUP_BYTES * \
+                                        GD32LA_SAMPLES_PER_BYTE)   /* 18 */
+
 /* Work modes, passed in the argument byte of GD32LA_CMD_START */
 #define GD32LA_MODE_LOGIC              0U
 #define GD32LA_MODE_ANALOG             1U
+#define GD32LA_MODE_MIXED              2U
 
 /* Command ids */
 #define GD32LA_CMD_START               0x01U   /* arg = mode, value = samplerate */
@@ -94,7 +118,7 @@
 #define GD32LA_HDR_MAGIC1              'D'
 #define GD32LA_HDR_MAGIC2              'L'
 #define GD32LA_HDR_MAGIC3              'A'
-#define GD32LA_HDR_VERSION             2U
+#define GD32LA_HDR_VERSION             3U
 #define GD32LA_HDR_LEN                 20U
 
 #if defined(__GNUC__) || defined(__clang__)
@@ -119,7 +143,7 @@ typedef struct GD32LA_PACKED {
     uint16_t packet_size;    /* GD32LA_PACKET_SIZE */
     uint32_t samplerate;     /* Hz, echo of the START command */
     uint32_t flags;          /* bit0: ch1 phase shifted by 90 degrees */
-    uint8_t  mode;           /* GD32LA_MODE_LOGIC / GD32LA_MODE_ANALOG */
+    uint8_t  mode;           /* GD32LA_MODE_LOGIC / _ANALOG / _MIXED */
     uint8_t  analog_channels;/* GD32LA_ANALOG_CHANNELS */
     uint8_t  analog_bits;    /* GD32LA_ANALOG_BITS */
     uint8_t  reserved;

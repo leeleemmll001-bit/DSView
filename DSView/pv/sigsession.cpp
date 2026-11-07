@@ -927,7 +927,12 @@ namespace pv
             sr_channel *probe = (sr_channel *)l->data;
             assert(probe); 
 
-            if (mode == LOGIC && probe->type != SR_CHANNEL_LOGIC){
+            // A mixed signal device reports analog probes next to the logic
+            // probes and streams both at the same samplerate. Keeping the
+            // analog probes here is what puts the two trace types on one
+            // time axis; devices without analog probes are unaffected.
+            if (mode == LOGIC && probe->type != SR_CHANNEL_LOGIC &&
+                probe->type != SR_CHANNEL_ANALOG){
                 continue;
             }
             
@@ -1005,7 +1010,10 @@ namespace pv
   
             signal = NULL; 
 
-            if (mode == LOGIC && probe->type != SR_CHANNEL_LOGIC){
+            // LOGIC mode also keeps the analog probes of a mixed signal
+            // device, see init_signals().
+            if (mode == LOGIC && probe->type != SR_CHANNEL_LOGIC &&
+                probe->type != SR_CHANNEL_ANALOG){
                 continue;
             }
 

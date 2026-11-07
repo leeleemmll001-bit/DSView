@@ -786,11 +786,25 @@ void View::signals_changed(const Trace* eventTrace)
         //Make list by view-index;
         if (mode == LOGIC)
         {   
+            // A mixed signal device streams analog channels next to the logic
+            // ones. They belong to the same time viewport, so they have to
+            // survive the reordering below instead of being dropped with the
+            // rest of the original time_traces list.
+            std::vector<Trace*> analog_traces;
+            for(auto t : time_traces){
+                if (t->get_type() == SR_CHANNEL_ANALOG)
+                    analog_traces.push_back(t);
+            }
+
             time_traces.clear();
 
             std::vector<Trace*> all_traces;
 
             for(auto t : logic_traces){
+                all_traces.push_back(t);
+            }
+
+            for(auto t : analog_traces){
                 all_traces.push_back(t);
             }
 
