@@ -22,14 +22,23 @@
 /* Number and size of the asynchronous bulk transfers kept in flight.
  *
  * The size is a multiple of every group size the device can send, so a
- * transfer never ends in the middle of a sample group:
+ * transfer normally never ends in the middle of a sample group:
  *
  *   logic  4032 / 16 = 252 groups of 64 samples
  *   analog 4032 /  2 = 2016 samples
- *   mixed  4032 / 18 = 224 groups of 8 samples
+ *   mixed  4032 / 144 = 28 groups of 64 samples
+ *
+ * A short packet can still cut a transfer in half, so whatever is left of a
+ * group is carried over to the next transfer.
  */
 #define GD32LA_NUM_TRANSFERS            4
 #define GD32LA_TRANSFER_SIZE            4032
+
+/* One buffer = raw stream + logic payload + analog payload + glue scratch.
+ * The scratch holds a raw transfer plus the group tail carried over from the
+ * previous one. */
+#define GD32LA_BUFFER_SIZE              (GD32LA_TRANSFER_SIZE * 4 + \
+                                         GD32LA_MIXED_GROUP_BYTES)
 
 /* Timeout used for the short control style reads (header, drain). */
 #define GD32LA_SHORT_TIMEOUT_MS         1000
@@ -45,8 +54,8 @@
 #define GD32LA_DEFAULT_ALIMIT           SR_KHZ(100)
 #define GD32LA_MAX_ASRATE               SR_KHZ(200)
 
-/* Mixed captures need 18 bytes per 8 samples, that is 2.25 bytes per sample
- * and channel set, so the same ceiling applies as for the analog mode. */
+/* Mixed captures need 144 bytes per 64 samples, that is 2.25 bytes per
+ * sample and channel set, so the same ceiling applies as for analog mode. */
 #define GD32LA_MAX_MIXED_RATE           SR_KHZ(200)
 
 /* The firmware cannot represent a 1 kHz square wave below this rate. */
@@ -86,10 +95,15 @@ struct gd32la_context {
     gboolean ended;
 
     struct libusb_transfer *transfers[GD32LA_NUM_TRANSFERS];
-    /* Every buffer holds three areas: the raw sample stream read by libusb,
-     * then the de-interleaved logic and analog payloads handed to DSView. */
+    /* Every buffer holds four areas: the raw sample stream read by libusb,
+     * then the de-interleaved logic and analog payloads handed to DSView,
+     * then scratch space to glue a partial group to the next transfer. */
     guint8 *buffers[GD32LA_NUM_TRANSFERS];
     int outstanding;
+
+    /* Tail of a sample group that the last transfer cut in half. */
+    guint8 carry[GD32LA_MIXED_GROUP_BYTES];
+    guint carry_len;
 };
 
 SR_PRIV struct sr_dev_driver gd32la_driver_info;

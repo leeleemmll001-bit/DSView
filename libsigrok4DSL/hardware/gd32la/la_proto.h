@@ -56,13 +56,20 @@
 
     Mixed sample layout
     -------------------
-    One mixed group covers GD32LA_SAMPLES_PER_BYTE (8) samples and is
-    GD32LA_MIXED_GROUP_BYTES (18) bytes long:
+    A mixed group is exactly one logic cross block plus the matching analog
+    samples: GD32LA_GROUP_SAMPLES (64) samples, GD32LA_MIXED_GROUP_BYTES
+    (144) bytes long.
 
-      byte 0                 D0, 8 samples, bit 0 oldest
-      byte 1                 D1, 8 samples, bit 0 oldest
-      byte 2 + 2*n + 0       A0 sample n
-      byte 2 + 2*n + 1       A1 sample n
+      byte  0 ..  7          D0, 64 samples, bit 0 oldest
+      byte  8 .. 15          D1, 64 samples, bit 0 oldest
+      byte 16 + 2*n + 0      A0 sample n
+      byte 16 + 2*n + 1      A1 sample n        (n = 0 .. 63)
+
+    The logic part of the group has to stay a full cross block (8 bytes per
+    channel): DSView stores logic samples 64 at a time and reads one 8 byte
+    block per channel per step, so handing it one byte per channel makes it
+    splice neighbouring groups together and the digital traces turn into
+    noise.
 
     Digital and analog stay in lockstep, so sample n of every channel of a
     group belongs to the same instant on the DSView time axis.
@@ -88,7 +95,14 @@
 /* Logic channel configuration */
 #define GD32LA_CHANNELS                2U
 #define GD32LA_SAMPLES_PER_BYTE        8U
-#define GD32LA_GROUP_BYTES             (GD32LA_CHANNELS * 8U)   /* 16 */
+#define GD32LA_BYTES_PER_CHANNEL       8U
+
+/* One cross block: 8 bytes of every channel, that is 64 samples per channel.
+ * This is the granularity DSView's LogicSnapshot works with. */
+#define GD32LA_GROUP_SAMPLES           (GD32LA_BYTES_PER_CHANNEL * \
+                                        GD32LA_SAMPLES_PER_BYTE)          /* 64 */
+#define GD32LA_GROUP_BYTES             (GD32LA_CHANNELS * \
+                                        GD32LA_BYTES_PER_CHANNEL)         /* 16 */
 
 /* Analog channel configuration */
 #define GD32LA_ANALOG_CHANNELS         2U
@@ -96,11 +110,11 @@
 #define GD32LA_ANALOG_MID              128U
 #define GD32LA_ANALOG_GROUP_BYTES      (GD32LA_ANALOG_CHANNELS * 1U)
 
-/* Mixed group: 8 samples of each digital channel (one byte per channel) plus
- * 8 interleaved analog sample pairs. */
-#define GD32LA_MIXED_GROUP_BYTES       (GD32LA_CHANNELS + \
+/* Mixed group: one complete logic cross block followed by the analog samples
+ * of the same 64 instants. 16 + 128 = 144 bytes per 64 samples. */
+#define GD32LA_MIXED_GROUP_BYTES       (GD32LA_GROUP_BYTES + \
                                         GD32LA_ANALOG_GROUP_BYTES * \
-                                        GD32LA_SAMPLES_PER_BYTE)   /* 18 */
+                                        GD32LA_GROUP_SAMPLES)             /* 144 */
 
 /* Work modes, passed in the argument byte of GD32LA_CMD_START */
 #define GD32LA_MODE_LOGIC              0U
@@ -118,7 +132,7 @@
 #define GD32LA_HDR_MAGIC1              'D'
 #define GD32LA_HDR_MAGIC2              'L'
 #define GD32LA_HDR_MAGIC3              'A'
-#define GD32LA_HDR_VERSION             3U
+#define GD32LA_HDR_VERSION             4U
 #define GD32LA_HDR_LEN                 20U
 
 #if defined(__GNUC__) || defined(__clang__)

@@ -363,10 +363,15 @@ static void la_stop_transfers(struct gd32la_context *devc)
 }
 
 /* Split the raw stream of one transfer into a logic payload and an analog
- * payload and hand both to the session. Only enabled digital channels are
- * put into the logic payload (DSView builds its logic snapshot from the
- * enabled probes only), while the analog payload always carries every analog
- * probe, enabled or not (DSView keeps a fixed slot per analog probe). */
+ * payload and hand both to the session.
+ *
+ * The logic payload must keep DSView's cross layout: one 8 byte block per
+ * enabled digital channel, which is 64 samples. DSView's LogicSnapshot reads
+ * exactly one uint64 per channel per step, so a shorter block per channel
+ * makes it splice neighbouring groups together and the traces turn into
+ * noise. Only enabled digital channels go into the payload, DSView builds
+ * its snapshot from those. The analog payload always carries every analog
+ * probe, enabled or not, because DSView keeps a fixed slot per probe. */
 static void la_forward(struct gd32la_context *devc, struct libusb_transfer *transfer)
 {
     struct sr_datafeed_packet packet;
@@ -375,42 +380,74 @@ static void la_forward(struct gd32la_context *devc, struct libusb_transfer *tran
     guint8 *raw = transfer->buffer;
     guint8 *logic_buf = raw + GD32LA_TRANSFER_SIZE;
     guint8 *analog_buf = logic_buf + GD32LA_TRANSFER_SIZE;
+    guint8 *scratch = analog_buf + GD32LA_TRANSFER_SIZE;
     guint8 *lp = logic_buf;
     guint8 *ap = analog_buf;
+    guint8 *stream = raw;
     guint len = (guint)transfer->actual_length;
+    guint group_bytes;
+    guint groups, used;
     guint64 samples = 0;
-    guint i, ch, s;
+    guint i, ch;
 
     packet.status = SR_PKT_OK;
 
     switch (devc->stream_mode) {
+    case GD32LA_MODE_MIXED:
+        group_bytes = GD32LA_MIXED_GROUP_BYTES;
+        break;
+    case GD32LA_MODE_ANALOG:
+        group_bytes = GD32LA_ANALOG_GROUP_BYTES;
+        break;
+    default:
+        group_bytes = GD32LA_GROUP_BYTES;
+        break;
+    }
+
+    /* Finish the group the previous transfer left open, if any. */
+    if (devc->carry_len > 0) {
+        memcpy(scratch, devc->carry, devc->carry_len);
+        memcpy(scratch + devc->carry_len, raw, len);
+        len += devc->carry_len;
+        stream = scratch;
+        devc->carry_len = 0;
+    }
+
+    groups = len / group_bytes;
+    used = groups * group_bytes;
+
+    if (len > used) {
+        memcpy(devc->carry, stream + used, len - used);
+        devc->carry_len = len - used;
+    }
+
+    switch (devc->stream_mode) {
     case GD32LA_MODE_MIXED: {
-        guint groups = len / GD32LA_MIXED_GROUP_BYTES;
-
         for (i = 0; i < groups; i++) {
-            const guint8 *grp = raw + i * GD32LA_MIXED_GROUP_BYTES;
+            const guint8 *grp = stream + i * GD32LA_MIXED_GROUP_BYTES;
 
+            /* full cross block: 8 bytes per enabled digital channel */
             for (ch = 0; ch < GD32LA_CHANNELS; ch++) {
-                if (devc->logic_mask & (1u << ch))
-                    *lp++ = grp[ch];
+                if (devc->logic_mask & (1u << ch)) {
+                    memcpy(lp, grp + ch * GD32LA_BYTES_PER_CHANNEL,
+                           GD32LA_BYTES_PER_CHANNEL);
+                    lp += GD32LA_BYTES_PER_CHANNEL;
+                }
             }
 
-            for (s = 0; s < GD32LA_SAMPLES_PER_BYTE; s++) {
-                for (ch = 0; ch < GD32LA_ANALOG_CHANNELS; ch++)
-                    *ap++ = grp[GD32LA_CHANNELS +
-                                s * GD32LA_ANALOG_CHANNELS + ch];
-            }
+            /* the 64 analog sample pairs of the same instants */
+            memcpy(ap, grp + GD32LA_GROUP_BYTES,
+                   GD32LA_ANALOG_GROUP_BYTES * GD32LA_GROUP_SAMPLES);
+            ap += GD32LA_ANALOG_GROUP_BYTES * GD32LA_GROUP_SAMPLES;
         }
 
-        samples = (guint64)groups * GD32LA_SAMPLES_PER_BYTE;
+        samples = (guint64)groups * GD32LA_GROUP_SAMPLES;
         break;
     }
 
     case GD32LA_MODE_ANALOG: {
-        guint groups = len / GD32LA_ANALOG_GROUP_BYTES;
-
         for (i = 0; i < groups; i++) {
-            const guint8 *grp = raw + i * GD32LA_ANALOG_GROUP_BYTES;
+            const guint8 *grp = stream + i * GD32LA_ANALOG_GROUP_BYTES;
 
             for (ch = 0; ch < GD32LA_ANALOG_CHANNELS; ch++)
                 *ap++ = grp[ch];
@@ -421,20 +458,19 @@ static void la_forward(struct gd32la_context *devc, struct libusb_transfer *tran
     }
 
     default: {
-        guint groups = len / GD32LA_GROUP_BYTES;
-
         for (i = 0; i < groups; i++) {
-            const guint8 *grp = raw + i * GD32LA_GROUP_BYTES;
+            const guint8 *grp = stream + i * GD32LA_GROUP_BYTES;
 
             for (ch = 0; ch < GD32LA_CHANNELS; ch++) {
                 if (devc->logic_mask & (1u << ch)) {
-                    memcpy(lp, grp + ch * 8, 8);
-                    lp += 8;
+                    memcpy(lp, grp + ch * GD32LA_BYTES_PER_CHANNEL,
+                           GD32LA_BYTES_PER_CHANNEL);
+                    lp += GD32LA_BYTES_PER_CHANNEL;
                 }
             }
         }
 
-        samples = (guint64)groups * 8 * GD32LA_SAMPLES_PER_BYTE;
+        samples = (guint64)groups * GD32LA_GROUP_SAMPLES;
         break;
     }
     }
@@ -527,8 +563,8 @@ static int la_start_transfers(struct gd32la_context *devc,
     devc->outstanding = 0;
 
     for (i = 0; i < GD32LA_NUM_TRANSFERS; i++) {
-        /* raw stream, then the two de-interleaved payload areas */
-        devc->buffers[i] = g_try_malloc0(GD32LA_TRANSFER_SIZE * 3);
+        /* raw stream, the two de-interleaved payload areas and scratch */
+        devc->buffers[i] = g_try_malloc0(GD32LA_BUFFER_SIZE);
         if (devc->buffers[i] == NULL) {
             sr_err("Out of memory for transfer buffer.");
             la_stop_transfers(devc);
@@ -922,6 +958,7 @@ static int hw_dev_acquisition_start(struct sr_dev_inst *sdi, void *cb_data)
     devc->abort = FALSE;
     devc->limit_reached = FALSE;
     devc->ended = FALSE;
+    devc->carry_len = 0;
 
     ret = la_pick_stream_mode(sdi);
     if (ret != SR_OK)
