@@ -30,6 +30,12 @@
 #define GD32LA_DEFAULT_SAMPLERATE       SR_MHZ(1)
 #define GD32LA_DEFAULT_LIMIT_SAMPLES    SR_MHZ(1)
 
+/* Analog mode defaults: 100 kSa/s for one second. Two 8 bit channels at that
+ * rate need 200 kB/s, well inside what a full speed bulk pipe can carry. */
+#define GD32LA_DEFAULT_ASRATE           SR_KHZ(100)
+#define GD32LA_DEFAULT_ALIMIT           SR_KHZ(100)
+#define GD32LA_MAX_ASRATE               SR_KHZ(200)
+
 /* The firmware cannot represent a 1 kHz square wave below this rate. */
 #define GD32LA_MIN_SAMPLERATE           SR_KHZ(2)
 

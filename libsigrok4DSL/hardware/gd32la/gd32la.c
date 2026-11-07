@@ -5,8 +5,12 @@
  *
  * The device is a GD32F470VE running the firmware in MyLogic/firmware. It
  * enumerates as a vendor specific USB full speed device with two bulk
- * endpoints and streams cross interleaved logic samples (LA_CROSS_DATA), the
- * same data layout the DreamSourceLab devices use.
+ * endpoints and streams one of two sample formats:
+ *
+ *   LOGIC   cross interleaved logic samples (LA_CROSS_DATA), as the
+ *           DreamSourceLab logic analyzers send them
+ *   ANALOG  interleaved 8 bit samples of two analog channels, as the
+ *           DreamSourceLab DAQ devices send them
  *
  * Because the whole sample stream is produced on the MCU, this driver is
  * small: scan, open, configure, start/stop acquisition, and forward the bulk
@@ -30,13 +34,21 @@
 static struct sr_dev_driver *di = &gd32la_driver_info;
 
 static int dev_destroy(struct sr_dev_inst *sdi);
+static void la_rebuild_channels(struct sr_dev_inst *sdi);
 
-static const char *probe_names[] = {
-    "0", "1",
+static const char *logic_probe_names[] = {
+    "D0", "D1",
     NULL,
 };
 
-static const uint64_t samplerates[] = {
+static const char *analog_probe_names[] = {
+    "A0", "A1",
+    NULL,
+};
+
+/* Full speed bulk tops out at about 1 MB/s, so the analog mode is limited to
+ * 200 kSa/s with two channels (400 kB/s). */
+static const uint64_t logic_samplerates[] = {
     SR_KHZ(10),
     SR_KHZ(20),
     SR_KHZ(50),
@@ -44,6 +56,45 @@ static const uint64_t samplerates[] = {
     SR_KHZ(200),
     SR_KHZ(500),
     SR_MHZ(1),
+};
+
+static const uint64_t analog_samplerates[] = {
+    SR_KHZ(10),
+    SR_KHZ(20),
+    SR_KHZ(50),
+    SR_KHZ(100),
+    SR_KHZ(200),
+};
+
+/* Probe controls offered in the device options dialog, same set the DAQ demo
+ * device exposes. */
+static const int32_t probe_options[] = {
+    SR_CONF_PROBE_COUPLING,
+    SR_CONF_PROBE_VDIV,
+    SR_CONF_PROBE_MAP_DEFAULT,
+    SR_CONF_PROBE_MAP_UNIT,
+    SR_CONF_PROBE_MAP_MIN,
+    SR_CONF_PROBE_MAP_MAX,
+};
+
+static const uint64_t vdivs[] = {
+    SR_mV(10),
+    SR_mV(20),
+    SR_mV(50),
+    SR_mV(100),
+    SR_mV(200),
+    SR_mV(500),
+    SR_V(1),
+    SR_V(2),
+};
+
+static const uint8_t couplings[] = {
+    SR_DC_COUPLING,
+    SR_AC_COUPLING,
+};
+
+static const char *map_units[] = {
+    "V", "A", "\xc2\xb0""C", "\xc2\xb0""F", "g", "m", "m/s",
 };
 
 static const int32_t sessions[] = {
@@ -146,9 +197,17 @@ static int la_read_header(struct sr_usb_dev_inst *usb)
                        (unsigned int)hdr->channels, GD32LA_CHANNELS);
                 return SR_ERR;
             }
+            if (hdr->mode == GD32LA_MODE_ANALOG &&
+                hdr->analog_bits != GD32LA_ANALOG_BITS) {
+                sr_err("Device streams %u bit analog samples, expected %u.",
+                       (unsigned int)hdr->analog_bits,
+                       (unsigned int)GD32LA_ANALOG_BITS);
+                return SR_ERR;
+            }
 
-            sr_info("Sample stream started: %u Hz, %u channels, %u byte packets.",
-                    (unsigned int)hdr->samplerate, (unsigned int)hdr->channels,
+            sr_info("Sample stream started: %u Hz, %s mode, %u byte packets.",
+                    (unsigned int)hdr->samplerate,
+                    (hdr->mode == GD32LA_MODE_ANALOG) ? "analog" : "logic",
                     (unsigned int)hdr->packet_size);
             return SR_OK;
         }
@@ -239,22 +298,43 @@ static void LIBUSB_CALL la_transfer_cb(struct libusb_transfer *transfer)
 
     if (transfer->actual_length > 0 && !devc->abort && !devc->limit_reached) {
         packet.status = SR_PKT_OK;
-        packet.type = SR_DF_LOGIC;
-        packet.payload = &logic;
 
-        logic.length = transfer->actual_length;
-        logic.format = LA_CROSS_DATA;
-        logic.index = 0;
-        logic.order = 0;
-        logic.unitsize = 1;
-        logic.data_error = 0;
-        logic.error_pattern = 0;
-        logic.data = transfer->buffer;
+        if (devc->sdi->mode == ANALOG) {
+            struct sr_datafeed_analog analog;
 
-        ds_data_forward(devc->sdi, &packet);
+            packet.type = SR_DF_ANALOG;
+            packet.payload = &analog;
 
-        devc->sent_samples += transfer->actual_length * 8 /
-                              GD32LA_CHANNELS;
+            analog.probes = devc->sdi->channels;
+            analog.num_samples = transfer->actual_length / (int)GD32LA_ANALOG_GROUP_BYTES;
+            analog.unit_bits = GD32LA_ANALOG_BITS;
+            analog.unit_pitch = 0;
+            analog.mq = SR_MQ_VOLTAGE;
+            analog.unit = SR_UNIT_VOLT;
+            analog.mqflags = SR_MQFLAG_AC;
+            analog.data = transfer->buffer;
+
+            ds_data_forward(devc->sdi, &packet);
+
+            devc->sent_samples += (uint64_t)analog.num_samples;
+        } else {
+            packet.type = SR_DF_LOGIC;
+            packet.payload = &logic;
+
+            logic.length = transfer->actual_length;
+            logic.format = LA_CROSS_DATA;
+            logic.index = 0;
+            logic.order = 0;
+            logic.unitsize = 1;
+            logic.data_error = 0;
+            logic.error_pattern = 0;
+            logic.data = transfer->buffer;
+
+            ds_data_forward(devc->sdi, &packet);
+
+            devc->sent_samples += transfer->actual_length * 8 /
+                                  GD32LA_CHANNELS;
+        }
 
         if (!devc->is_loop && devc->limit_samples > 0 &&
             devc->sent_samples >= devc->limit_samples) {
@@ -429,17 +509,7 @@ static GSList *hw_scan(GSList *options)
         usb->usb_dev = device;
         sdi->conn = usb;
 
-        for (uint16_t j = 0; j < GD32LA_CHANNELS; j++) {
-            struct sr_channel *probe;
-
-            probe = sr_channel_new(j, SR_CHANNEL_LOGIC, TRUE, probe_names[j]);
-            if (probe == NULL) {
-                sr_err("Failed to create channel %d.", j);
-                break;
-            }
-            probe->bits = 1;
-            sdi->channels = g_slist_append(sdi->channels, probe);
-        }
+        la_rebuild_channels(sdi);
 
         sr_info("Found device %04x:%04x on bus %d address %d.",
                 des.idVendor, des.idProduct, usb->bus, usb->address);
@@ -458,10 +528,58 @@ static const GSList *hw_dev_mode_list(const struct sr_dev_inst *sdi)
 
     (void)sdi;
 
-    /* The simulator is a logic analyzer only. */
-    l = g_slist_append(l, (gpointer)&sr_mode_list[0]);
+    /* The same device can run as a logic analyzer or as a two channel data
+     * acquisition unit, DSView lets the user pick one per session. */
+    l = g_slist_append(l, (gpointer)&sr_mode_list[0]);   /* LOGIC  */
+    l = g_slist_append(l, (gpointer)&sr_mode_list[1]);   /* ANALOG */
 
     return l;
+}
+
+/* Build the channel list that matches sdi->mode. Called from the scan and
+ * whenever the user switches the work mode. */
+static void la_rebuild_channels(struct sr_dev_inst *sdi)
+{
+    struct gd32la_context *devc = sdi->priv;
+    gboolean analog = (sdi->mode == ANALOG);
+
+    sr_dev_probes_free(sdi);
+
+    for (uint16_t j = 0; j < GD32LA_CHANNELS; j++) {
+        struct sr_channel *probe;
+
+        probe = sr_channel_new(j,
+                               analog ? SR_CHANNEL_ANALOG : SR_CHANNEL_LOGIC,
+                               TRUE,
+                               analog ? analog_probe_names[j] : logic_probe_names[j]);
+        if (probe == NULL) {
+            sr_err("Failed to create channel %u.", (unsigned int)j);
+            break;
+        }
+
+        if (analog) {
+            /* Same defaults the DAQ demo device uses: 8 bit samples centred
+             * on 128, 1 V/div, AC coupling, -5 V .. +5 V display range. */
+            probe->bits = GD32LA_ANALOG_BITS;
+            probe->coupling = SR_AC_COUPLING;
+            probe->vdiv = SR_V(1);
+            probe->vfactor = SR_mV(1);
+            probe->hw_offset = GD32LA_ANALOG_MID;
+            probe->offset = GD32LA_ANALOG_MID;
+            probe->trig_value = GD32LA_ANALOG_MID;
+            probe->map_default = TRUE;
+            probe->map_unit = map_units[0];
+            probe->map_min = -5.0;
+            probe->map_max = 5.0;
+        } else {
+            probe->bits = 1;
+        }
+
+        sdi->channels = g_slist_append(sdi->channels, probe);
+    }
+
+    if (devc != NULL)
+        devc->channels_enabled = GD32LA_CHANNELS;
 }
 
 static int hw_dev_open(struct sr_dev_inst *sdi)
@@ -548,6 +666,7 @@ static int hw_dev_acquisition_start(struct sr_dev_inst *sdi, void *cb_data)
     struct gd32la_context *devc = sdi->priv;
     struct sr_usb_dev_inst *usb = sdi->conn;
     uint32_t samplerate;
+    uint8_t mode;
     int ret;
 
     (void)cb_data;
@@ -564,20 +683,38 @@ static int hw_dev_acquisition_start(struct sr_dev_inst *sdi, void *cb_data)
     devc->limit_reached = FALSE;
     devc->ended = FALSE;
 
-    if (devc->samplerate < GD32LA_MIN_SAMPLERATE)
-        devc->samplerate = GD32LA_DEFAULT_SAMPLERATE;
+    if (sdi->mode == ANALOG) {
+        mode = GD32LA_MODE_ANALOG;
+
+        /* Two 8 bit channels at the requested rate have to fit the full
+         * speed bulk pipe. */
+        if (devc->samplerate > GD32LA_MAX_ASRATE) {
+            sr_warn("Analog mode tops out at %" PRIu64 " Hz, clamping the "
+                    "samplerate.", (uint64_t)GD32LA_MAX_ASRATE);
+            devc->samplerate = GD32LA_MAX_ASRATE;
+        }
+        if (devc->samplerate < GD32LA_MIN_SAMPLERATE)
+            devc->samplerate = GD32LA_DEFAULT_ASRATE;
+        if (devc->limit_samples == 0)
+            devc->limit_samples = GD32LA_DEFAULT_ALIMIT;
+    } else {
+        mode = GD32LA_MODE_LOGIC;
+        if (devc->samplerate < GD32LA_MIN_SAMPLERATE)
+            devc->samplerate = GD32LA_DEFAULT_SAMPLERATE;
+    }
 
     samplerate = (uint32_t)devc->samplerate;
 
-    sr_info("Starting acquisition: %" PRIu64 " Hz, limit %" PRIu64 " samples.",
-            devc->samplerate, devc->limit_samples);
+    sr_info("Starting acquisition: %" PRIu64 " Hz, limit %" PRIu64
+            " samples, %s mode.", devc->samplerate, devc->limit_samples,
+            (mode == GD32LA_MODE_ANALOG) ? "analog" : "logic");
 
     /* Stop whatever the device was doing and flush the pipe, so the header
      * of the new stream is the first thing we read. */
     la_send_cmd(usb, GD32LA_CMD_STOP, 0, 0);
     la_drain(usb);
 
-    ret = la_send_cmd(usb, GD32LA_CMD_START, 0, samplerate);
+    ret = la_send_cmd(usb, GD32LA_CMD_START, mode, samplerate);
     if (ret != SR_OK) {
         ds_set_last_error(SR_ERR_DEVICE_USB_IO_ERROR);
         return ret;
@@ -665,7 +802,8 @@ static int config_get(int id, GVariant **data, const struct sr_dev_inst *sdi,
         *data = g_variant_new_int16(sdi->mode);
         break;
     case SR_CONF_UNIT_BITS:
-        *data = g_variant_new_byte(1);
+        *data = g_variant_new_byte((sdi->mode == ANALOG) ?
+                                   GD32LA_ANALOG_BITS : 1);
         break;
     case SR_CONF_VLD_CH_NUM:
         *data = g_variant_new_int16(GD32LA_CHANNELS);
@@ -681,6 +819,56 @@ static int config_get(int id, GVariant **data, const struct sr_dev_inst *sdi,
             return SR_ERR_ARG;
         *data = g_variant_new_boolean(ch->enabled);
         break;
+    case SR_CONF_PROBE_OFFSET:
+        if (ch == NULL)
+            return SR_ERR_ARG;
+        *data = g_variant_new_uint16(ch->offset);
+        break;
+    case SR_CONF_PROBE_HW_OFFSET:
+        if (ch == NULL)
+            return SR_ERR_ARG;
+        *data = g_variant_new_uint16(ch->hw_offset);
+        break;
+    case SR_CONF_PROBE_VDIV:
+        if (ch == NULL)
+            return SR_ERR_ARG;
+        *data = g_variant_new_uint64(ch->vdiv);
+        break;
+    case SR_CONF_PROBE_FACTOR:
+        if (ch == NULL)
+            return SR_ERR_ARG;
+        *data = g_variant_new_uint64(ch->vfactor);
+        break;
+    case SR_CONF_PROBE_COUPLING:
+        if (ch == NULL)
+            return SR_ERR_ARG;
+        *data = g_variant_new_byte(ch->coupling);
+        break;
+    case SR_CONF_TRIGGER_VALUE:
+        if (ch == NULL)
+            return SR_ERR_ARG;
+        *data = g_variant_new_byte(ch->trig_value);
+        break;
+    case SR_CONF_PROBE_MAP_DEFAULT:
+        if (ch == NULL)
+            return SR_ERR_ARG;
+        *data = g_variant_new_boolean(ch->map_default);
+        break;
+    case SR_CONF_PROBE_MAP_UNIT:
+        if (ch == NULL || ch->map_unit == NULL)
+            return SR_ERR_ARG;
+        *data = g_variant_new_string(ch->map_unit);
+        break;
+    case SR_CONF_PROBE_MAP_MIN:
+        if (ch == NULL)
+            return SR_ERR_ARG;
+        *data = g_variant_new_double(ch->map_min);
+        break;
+    case SR_CONF_PROBE_MAP_MAX:
+        if (ch == NULL)
+            return SR_ERR_ARG;
+        *data = g_variant_new_double(ch->map_max);
+        break;
     default:
         return SR_ERR_NA;
     }
@@ -693,6 +881,7 @@ static int config_set(int id, GVariant *data, struct sr_dev_inst *sdi,
                       struct sr_channel_group *cg)
 {
     struct gd32la_context *devc;
+    int mode;
 
     (void)cg;
 
@@ -711,7 +900,27 @@ static int config_set(int id, GVariant *data, struct sr_dev_inst *sdi,
         sr_dbg("Sample limit set to %" PRIu64 ".", devc->limit_samples);
         break;
     case SR_CONF_DEVICE_MODE:
-        sdi->mode = g_variant_get_int16(data);
+        mode = g_variant_get_int16(data);
+        if (mode != LOGIC && mode != ANALOG) {
+            sr_err("Unsupported work mode %d.", mode);
+            return SR_ERR_ARG;
+        }
+        if (sdi->mode != mode) {
+            sdi->mode = mode;
+            la_rebuild_channels(sdi);
+
+            /* Each mode has its own sane starting point. */
+            if (mode == ANALOG) {
+                devc->samplerate = GD32LA_DEFAULT_ASRATE;
+                devc->limit_samples = GD32LA_DEFAULT_ALIMIT;
+            } else {
+                devc->samplerate = GD32LA_DEFAULT_SAMPLERATE;
+                devc->limit_samples = GD32LA_DEFAULT_LIMIT_SAMPLES;
+            }
+
+            sr_info("Work mode set to %s.",
+                    (mode == ANALOG) ? "analog" : "logic");
+        }
         break;
     case SR_CONF_LOOP_MODE:
         devc->is_loop = g_variant_get_boolean(data);
@@ -721,6 +930,61 @@ static int config_set(int id, GVariant *data, struct sr_dev_inst *sdi,
         if (ch == NULL)
             return SR_ERR_ARG;
         ch->enabled = g_variant_get_boolean(data);
+        break;
+    case SR_CONF_PROBE_OFFSET:
+        if (ch == NULL)
+            return SR_ERR_ARG;
+        ch->offset = g_variant_get_uint16(data);
+        break;
+    case SR_CONF_PROBE_HW_OFFSET:
+        if (ch == NULL)
+            return SR_ERR_ARG;
+        ch->hw_offset = g_variant_get_uint16(data);
+        break;
+    case SR_CONF_PROBE_VDIV:
+        if (ch == NULL)
+            return SR_ERR_ARG;
+        ch->vdiv = g_variant_get_uint64(data);
+        break;
+    case SR_CONF_PROBE_FACTOR:
+        if (ch == NULL)
+            return SR_ERR_ARG;
+        ch->vfactor = g_variant_get_uint64(data);
+        break;
+    case SR_CONF_PROBE_COUPLING:
+        if (ch == NULL)
+            return SR_ERR_ARG;
+        ch->coupling = g_variant_get_byte(data);
+        break;
+    case SR_CONF_TRIGGER_VALUE:
+        if (ch == NULL)
+            return SR_ERR_ARG;
+        ch->trig_value = g_variant_get_byte(data);
+        break;
+    case SR_CONF_PROBE_MAP_DEFAULT:
+        if (ch == NULL)
+            return SR_ERR_ARG;
+        ch->map_default = g_variant_get_boolean(data);
+        if (ch->map_default) {
+            ch->map_unit = map_units[0];
+            ch->map_min = -5.0;
+            ch->map_max = 5.0;
+        }
+        break;
+    case SR_CONF_PROBE_MAP_UNIT:
+        if (ch == NULL)
+            return SR_ERR_ARG;
+        ch->map_unit = g_variant_get_string(data, NULL);
+        break;
+    case SR_CONF_PROBE_MAP_MIN:
+        if (ch == NULL)
+            return SR_ERR_ARG;
+        ch->map_min = g_variant_get_double(data);
+        break;
+    case SR_CONF_PROBE_MAP_MAX:
+        if (ch == NULL)
+            return SR_ERR_ARG;
+        ch->map_max = g_variant_get_double(data);
         break;
     default:
         return SR_ERR_NA;
@@ -734,9 +998,18 @@ static int config_list(int key, GVariant **data, const struct sr_dev_inst *sdi,
 {
     GVariant *gvar;
     GVariantBuilder gvb;
+    const uint64_t *rates;
+    gsize rate_count;
 
     (void)cg;
-    (void)sdi;
+
+    if (sdi != NULL && sdi->mode == ANALOG) {
+        rates = analog_samplerates;
+        rate_count = ARRAY_SIZE(analog_samplerates);
+    } else {
+        rates = logic_samplerates;
+        rate_count = ARRAY_SIZE(logic_samplerates);
+    }
 
     switch (key) {
     case SR_CONF_DEVICE_SESSIONS:
@@ -749,11 +1022,36 @@ static int config_list(int key, GVariant **data, const struct sr_dev_inst *sdi,
         return SR_ERR_NA;
     case SR_CONF_SAMPLERATE:
         g_variant_builder_init(&gvb, G_VARIANT_TYPE("a{sv}"));
-        gvar = g_variant_new_from_data(G_VARIANT_TYPE("at"), samplerates,
-                                       ARRAY_SIZE(samplerates) * sizeof(uint64_t),
+        gvar = g_variant_new_from_data(G_VARIANT_TYPE("at"), rates,
+                                       rate_count * sizeof(uint64_t),
                                        TRUE, NULL, NULL);
         g_variant_builder_add(&gvb, "{sv}", "samplerates", gvar);
         *data = g_variant_builder_end(&gvb);
+        break;
+    case SR_CONF_PROBE_CONFIGS:
+        *data = g_variant_new_from_data(G_VARIANT_TYPE("ai"), probe_options,
+                                        ARRAY_SIZE(probe_options) * sizeof(int32_t),
+                                        TRUE, NULL, NULL);
+        break;
+    case SR_CONF_PROBE_VDIV:
+        g_variant_builder_init(&gvb, G_VARIANT_TYPE("a{sv}"));
+        gvar = g_variant_new_from_data(G_VARIANT_TYPE("at"), vdivs,
+                                       ARRAY_SIZE(vdivs) * sizeof(uint64_t),
+                                       TRUE, NULL, NULL);
+        g_variant_builder_add(&gvb, "{sv}", "vdivs", gvar);
+        *data = g_variant_builder_end(&gvb);
+        break;
+    case SR_CONF_PROBE_COUPLING:
+        g_variant_builder_init(&gvb, G_VARIANT_TYPE("a{sv}"));
+        gvar = g_variant_new_from_data(G_VARIANT_TYPE("ay"), couplings,
+                                       ARRAY_SIZE(couplings) * sizeof(uint8_t),
+                                       TRUE, NULL, NULL);
+        g_variant_builder_add(&gvb, "{sv}", "coupling", gvar);
+        *data = g_variant_builder_end(&gvb);
+        break;
+    case SR_CONF_PROBE_MAP_UNIT:
+        *data = g_variant_new_strv((const char * const *)map_units,
+                                   ARRAY_SIZE(map_units));
         break;
     default:
         return SR_ERR_NA;
@@ -764,7 +1062,7 @@ static int config_list(int key, GVariant **data, const struct sr_dev_inst *sdi,
 
 SR_PRIV struct sr_dev_driver gd32la_driver_info = {
     .name = "gd32la",
-    .longname = "GD32F470 logic analyzer simulator",
+    .longname = "GD32F470 logic analyzer and DAQ simulator",
     .api_version = 1,
     .driver_type = DRIVER_TYPE_HARDWARE,
     .init = hw_init,
