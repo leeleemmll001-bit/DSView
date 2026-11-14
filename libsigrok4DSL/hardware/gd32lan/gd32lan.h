@@ -44,6 +44,15 @@
 /* Polling interval of the session source that drains the receive queue. */
 #define GD32LAN_POLL_INTERVAL_MS    5
 
+/* While a capture runs the driver sends a PING every 500 ms, so the device
+ * knows the host is still there. The device auto-stops its stream after
+ * LA_WATCHDOG_MS (1.5 s) of complete silence. */
+#define GD32LAN_KEEPALIVE_TICKS     (500 / GD32LAN_POLL_INTERVAL_MS)
+
+/* Grace period between the STOP command and the TCP disconnect, so the
+ * serial server has time to push the command out on the wire. */
+#define GD32LAN_STOP_LINGER_MS      100
+
 /* Connect / handshake timeouts. */
 #define GD32LAN_CONNECT_TIMEOUT_MS  3000
 #define GD32LAN_RECV_STEP_MS        250
@@ -86,6 +95,9 @@ struct gd32lan_context {
     /* Tail of a sample group that a recv chunk cut in half. */
     guint8 carry[GD32LA_MIXED_GROUP_BYTES];
     guint carry_len;
+
+    /* Session source invocations since the last keepalive PING. */
+    guint keepalive_ticks;
 };
 
 /* Private driver context: the one network device this driver exposes. */

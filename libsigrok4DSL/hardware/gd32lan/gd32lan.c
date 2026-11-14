@@ -697,6 +697,18 @@ static gpointer lan_rx_thread(gpointer data)
     return NULL;
 }
 
+/* Stop the device stream and give the serial server time to push the
+ * command out before the TCP connection goes away. Without this the
+ * device keeps transmitting at full rate after DSView stopped reading,
+ * because nothing tells it to stop. */
+static void lan_send_stop(struct gd32lan_context *devc)
+{
+    if (devc->sock != INVALID_SOCKET) {
+        lan_send_cmd(devc, GD32LA_CMD_STOP, 0, 0);
+        g_usleep(GD32LAN_STOP_LINGER_MS * 1000);
+    }
+}
+
 /* Timer driven session source: drain the queue in the session thread. */
 static int lan_receive_data(int fd, int revents, const struct sr_dev_inst *sdi)
 {
@@ -710,6 +722,17 @@ static int lan_receive_data(int fd, int revents, const struct sr_dev_inst *sdi)
     if (revents == -1 && !devc->abort) {
         sr_info("Acquisition aborted by the session.");
         devc->abort = TRUE;
+    }
+
+    /* keepalive: prove to the device that the host is still there, it
+     * auto-stops after 1.5 s of silence (the PING is ignored by the
+     * firmware while a capture is running) */
+    if (!devc->abort && !devc->limit_reached && !devc->ended &&
+        devc->sock != INVALID_SOCKET &&
+        ++devc->keepalive_ticks >= GD32LAN_KEEPALIVE_TICKS) {
+        devc->keepalive_ticks = 0;
+        if (lan_send_cmd(devc, GD32LA_CMD_PING, 0, 0) != SR_OK)
+            sr_warn("Keepalive PING failed.");
     }
 
     /* steal whatever the receive thread collected */
@@ -746,6 +769,10 @@ static int lan_receive_data(int fd, int revents, const struct sr_dev_inst *sdi)
          (devc->rx_done && queue_empty))) {
         if (devc->rx_done && !devc->abort && !devc->limit_reached)
             sr_err("Link to %s:%s lost.", devc->host, devc->port);
+        /* tell the device to stop streaming before the link goes away,
+         * otherwise it transmits forever (serial links have no
+         * disconnect state the device could notice) */
+        lan_send_stop(devc);
         lan_stop_link(devc);
         lan_finish(devc);
     }
@@ -825,7 +852,7 @@ static int lan_start_link(struct gd32lan_context *devc)
     return SR_OK;
 
 err:
-    lan_send_cmd(devc, GD32LA_CMD_STOP, 0, 0);
+    lan_send_stop(devc);
     lan_stop_link(devc);
     return ret;
 }
@@ -1039,8 +1066,7 @@ static int hw_dev_close(struct sr_dev_inst *sdi)
 
     if (devc != NULL) {
         devc->abort = TRUE;
-        if (devc->sock != INVALID_SOCKET)
-            lan_send_cmd(devc, GD32LA_CMD_STOP, 0, 0);
+        lan_send_stop(devc);
         lan_stop_link(devc);
         devc->ended = TRUE;
     }
@@ -1145,6 +1171,7 @@ static int hw_dev_acquisition_start(struct sr_dev_inst *sdi, void *cb_data)
     devc->limit_reached = FALSE;
     devc->ended = FALSE;
     devc->carry_len = 0;
+    devc->keepalive_ticks = 0;
 
     ret = lan_pick_stream_mode(sdi);
     if (ret != SR_OK)
@@ -1208,9 +1235,7 @@ static int hw_dev_acquisition_stop(const struct sr_dev_inst *sdi,
 
     devc->abort = TRUE;
 
-    if (devc->sock != INVALID_SOCKET)
-        lan_send_cmd(devc, GD32LA_CMD_STOP, 0, 0);
-
+    lan_send_stop(devc);
     lan_stop_link(devc);
     lan_finish(devc);
 

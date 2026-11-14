@@ -134,7 +134,10 @@
 /* Command ids */
 #define GD32LA_CMD_START               0x01U   /* arg = mode, value = samplerate */
 #define GD32LA_CMD_STOP                0x02U
-#define GD32LA_CMD_PING                0x03U
+#define GD32LA_CMD_PING                0x03U   /* keepalive: while a capture runs
+                                                * the host PINGs every 500 ms;
+                                                * the device stops streaming after
+                                                * 1.5 s without any RX byte */
 #define GD32LA_CMD_SET_PHASE           0x04U   /* arg: 0 = ch1 90 deg, 1 = ch1 in phase */
 
 /* Header packet magic */
