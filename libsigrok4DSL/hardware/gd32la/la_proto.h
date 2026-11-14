@@ -121,6 +121,16 @@
 #define GD32LA_MODE_ANALOG             1U
 #define GD32LA_MODE_MIXED              2U
 
+/* Samplerate ceilings of the UART transport (460800 8N1 = 46080 B/s gross,
+ * keep roughly 20% head room for the serial server and its buffers):
+ *   logic  rate / 4 B/s    -> 128 kSa/s = 32 kB/s
+ *   analog rate * 2 B/s    ->  18 kSa/s = 36 kB/s
+ *   mixed  rate * 2.25 B/s ->  16 kSa/s = 36 kB/s
+ * Both the firmware and the network driver clamp to these values. */
+#define GD32LA_UART_MAX_LOGIC_RATE     128000U
+#define GD32LA_UART_MAX_ANALOG_RATE    18000U
+#define GD32LA_UART_MAX_MIXED_RATE     16000U
+
 /* Command ids */
 #define GD32LA_CMD_START               0x01U   /* arg = mode, value = samplerate */
 #define GD32LA_CMD_STOP                0x02U

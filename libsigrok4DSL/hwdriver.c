@@ -96,6 +96,7 @@ extern SR_PRIV struct sr_dev_driver DSCope_driver_info;
 #endif
 
 extern SR_PRIV struct sr_dev_driver gd32la_driver_info;
+extern SR_PRIV struct sr_dev_driver gd32lan_driver_info;
 /** @endcond */
 
 static struct sr_dev_driver *drivers_list[] = {
@@ -107,6 +108,7 @@ static struct sr_dev_driver *drivers_list[] = {
     &DSCope_driver_info,
 #endif
     &gd32la_driver_info,
+    &gd32lan_driver_info,
 	NULL,
 };
 

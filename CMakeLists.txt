@@ -488,6 +488,7 @@ set(libsigrok4DSL_SOURCES
     libsigrok4DSL/hardware/DSL/command.c
     libsigrok4DSL/hardware/DSL/dsl.c
     libsigrok4DSL/hardware/gd32la/gd32la.c
+    libsigrok4DSL/hardware/gd32lan/gd32lan.c
     libsigrok4DSL/lib_main.c
 )
 
@@ -499,6 +500,7 @@ set(libsigrok4DSL_HEADERS
     libsigrok4DSL/hardware/DSL/command.h
     libsigrok4DSL/hardware/DSL/dsl.h
     libsigrok4DSL/hardware/gd32la/gd32la.h
+    libsigrok4DSL/hardware/gd32lan/gd32lan.h
 )
  
 #===============================================================================
@@ -658,6 +660,11 @@ add_executable(${PROJECT_NAME}
 	${libsigrok4DSL_SOURCES}
 	${libsigrokdecode4DSL_SOURCES}
 )
+
+if(WIN32)
+    # The gd32lan network driver uses Winsock.
+    target_link_libraries(${PROJECT_NAME} ws2_32)
+endif()
 
 target_link_libraries(${PROJECT_NAME} ${DSVIEW_LINK_LIBS})
 
