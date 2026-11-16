@@ -44,10 +44,17 @@
 /* Polling interval of the session source that drains the receive queue. */
 #define GD32LAN_POLL_INTERVAL_MS    5
 
-/* While a capture runs the driver sends a PING every 500 ms, so the device
+/* While a capture runs the driver sends a PING every 300 ms, so the device
  * knows the host is still there. The device auto-stops its stream after
- * LA_WATCHDOG_MS (1.5 s) of complete silence. */
-#define GD32LAN_KEEPALIVE_TICKS     (500 / GD32LAN_POLL_INTERVAL_MS)
+ * LA_WATCHDOG_MS (1.5 s) of complete silence.
+ *
+ * The period is measured on the monotonic clock and not by counting session
+ * source invocations: a source with fd -1 only fires as fast as the timer
+ * granularity allows (Windows defaults to 15.6 ms, whatever interval was
+ * requested), so a tick counter stretched the keepalive to ~1.5 s and the
+ * device watchdog fired before the first PING ever went out. Three missed
+ * periods still leave room inside the 1.5 s watchdog. */
+#define GD32LAN_KEEPALIVE_US        (300 * 1000)
 
 /* Grace period between the STOP command and the TCP disconnect, so the
  * serial server has time to push the command out on the wire. */
@@ -96,8 +103,8 @@ struct gd32lan_context {
     guint8 carry[GD32LA_MIXED_GROUP_BYTES];
     guint carry_len;
 
-    /* Session source invocations since the last keepalive PING. */
-    guint keepalive_ticks;
+    /* Monotonic time of the last keepalive PING, see GD32LAN_KEEPALIVE_US. */
+    gint64 last_ping_us;
 };
 
 /* Private driver context: the one network device this driver exposes. */

@@ -726,13 +726,21 @@ static int lan_receive_data(int fd, int revents, const struct sr_dev_inst *sdi)
 
     /* keepalive: prove to the device that the host is still there, it
      * auto-stops after 1.5 s of silence (the PING is ignored by the
-     * firmware while a capture is running) */
+     * firmware while a capture is running).
+     *
+     * The period is tested against the monotonic clock on every invocation
+     * instead of counting invocations: the timer behind a source with fd -1
+     * can fire far slower than the requested interval, and a counter then
+     * lets the device watchdog expire before the first PING is sent. */
     if (!devc->abort && !devc->limit_reached && !devc->ended &&
-        devc->sock != INVALID_SOCKET &&
-        ++devc->keepalive_ticks >= GD32LAN_KEEPALIVE_TICKS) {
-        devc->keepalive_ticks = 0;
-        if (lan_send_cmd(devc, GD32LA_CMD_PING, 0, 0) != SR_OK)
-            sr_warn("Keepalive PING failed.");
+        devc->sock != INVALID_SOCKET) {
+        gint64 now = g_get_monotonic_time();
+
+        if (now - devc->last_ping_us >= GD32LAN_KEEPALIVE_US) {
+            devc->last_ping_us = now;
+            if (lan_send_cmd(devc, GD32LA_CMD_PING, 0, 0) != SR_OK)
+                sr_warn("Keepalive PING failed.");
+        }
     }
 
     /* steal whatever the receive thread collected */
@@ -1171,7 +1179,7 @@ static int hw_dev_acquisition_start(struct sr_dev_inst *sdi, void *cb_data)
     devc->limit_reached = FALSE;
     devc->ended = FALSE;
     devc->carry_len = 0;
-    devc->keepalive_ticks = 0;
+    devc->last_ping_us = 0;
 
     /* Drop whatever the receive thread collected after the last poll of the
      * previous capture. Nobody consumed those bytes (the session source is
@@ -1225,6 +1233,10 @@ static int hw_dev_acquisition_start(struct sr_dev_inst *sdi, void *cb_data)
         ds_set_last_error(SR_ERR_DEVICE_USB_IO_ERROR);
         return ret;
     }
+
+    /* The device watchdog restarts with the START command, so the keepalive
+     * clock starts here and not when the first poll happens. */
+    devc->last_ping_us = g_get_monotonic_time();
 
     sr_session_source_add(-1, 0, GD32LAN_POLL_INTERVAL_MS,
                           lan_receive_data, sdi);
