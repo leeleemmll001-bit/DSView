@@ -69,6 +69,7 @@ static const char *analog_probe_names[] = {
 static const uint64_t logic_samplerates[] = {
     SR_KHZ(2),
     SR_KHZ(5),
+    SR_HZ(6400),
     SR_KHZ(10),
     SR_KHZ(20),
     SR_KHZ(50),
@@ -79,6 +80,7 @@ static const uint64_t logic_samplerates[] = {
 static const uint64_t analog_samplerates[] = {
     SR_KHZ(2),
     SR_KHZ(5),
+    SR_HZ(6400),
     SR_KHZ(10),
     SR_KHZ(16),
     SR_KHZ(18),     /* 36 kB/s */
@@ -87,6 +89,7 @@ static const uint64_t analog_samplerates[] = {
 static const uint64_t mixed_samplerates[] = {
     SR_KHZ(2),
     SR_KHZ(5),
+    SR_HZ(6400),
     SR_KHZ(10),
     SR_KHZ(16),     /* 36 kB/s */
 };
