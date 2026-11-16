@@ -1,23 +1,25 @@
 /*
  * This file is part of the libsigrok project.
  *
- * GD32 logic analyzer simulator - network driver (TCP client).
+ * GD32 16 channel data acquisition simulator - network driver (TCP client).
  *
- * The board speaks the la_proto.h protocol on a UART (460800 8N1) which a
- * serial to Ethernet server in TCP server mode bridges to the network.
- * This driver is the TCP client. The stream formats are identical to the
- * USB driver (gd32la), so the split/forward logic mirrors gd32la.c and has
- * to be kept in sync with it.
+ * The board streams 16 analog channels (16 bit) over TWO UARTs, both
+ * 1500000 8N1. Two serial to Ethernet servers in TCP server mode bridge
+ * them to the network; the device alternates the frames between the links
+ * (even sequence numbers on link 0, odd on link 1), and this driver
+ * connects as a TCP client to both, merges the frames by sequence number
+ * and feeds the ordered stream to the session.
  *
- * Address of the serial server comes from the environment:
+ * Address of the serial servers comes from the environment:
  *
- *   GD32LA_HOST   default 192.168.1.100
- *   GD32LA_PORT   default 5000
+ *   GD32LA_HOST    default 192.168.1.100
+ *   GD32LA_PORT    default 2404   (link 0, even frames)
+ *   GD32LA_PORT2   default 2405   (link 1, odd frames)
  *
  * Transfer model: DSView's session poll (g_poll) is not reliable for
- * sockets on Windows, so a receive thread pumps the socket into a queue
- * and a 5 ms session timer drains the queue in the session thread, where
- * ds_data_forward() is safe to call.
+ * sockets on Windows, so one receive thread per link pumps its socket
+ * into a queue and a 5 ms session timer merges and drains both queues in
+ * the session thread, where ds_data_forward() is safe to call.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -54,43 +56,18 @@ static int dev_destroy(struct sr_dev_inst *sdi);
 static void lan_rebuild_channels(struct sr_dev_inst *sdi);
 static void lan_stop_link(struct gd32lan_context *devc);
 
-static const char *logic_probe_names[] = {
-    "D0", "D1",
-    NULL,
-};
-
 static const char *analog_probe_names[] = {
-    "A0", "A1",
+    "A0", "A1", "A2", "A3", "A4", "A5", "A6", "A7",
+    "A8", "A9", "A10", "A11", "A12", "A13", "A14", "A15",
     NULL,
 };
 
-/* Samplerates the 460800 baud serial link can carry, per stream format:
- * logic = rate / 4 B/s, analog = rate * 4 B/s, mixed = rate * 4.25 B/s. */
-static const uint64_t logic_samplerates[] = {
-    SR_KHZ(2),
-    SR_KHZ(5),
-    SR_HZ(6400),
-    SR_KHZ(10),
-    SR_KHZ(20),
-    SR_KHZ(50),
-    SR_KHZ(100),
-    SR_KHZ(128),    /* 32 kB/s */
-};
-
+/* Samplerates the two 1500000 baud serial links can carry:
+ * analog = rate * 32 B/s (16 channels, 2 bytes each). */
 static const uint64_t analog_samplerates[] = {
-    SR_KHZ(2),
-    SR_KHZ(5),
-    SR_HZ(6400),
-    SR_KHZ(8),
-    SR_KHZ(10),     /* 40 kB/s */
-};
-
-static const uint64_t mixed_samplerates[] = {
-    SR_KHZ(2),
-    SR_KHZ(5),
-    SR_HZ(6400),
-    SR_KHZ(8),
-    SR_KHZ(10),     /* 42.5 kB/s */
+    SR_KHZ(2),      /*  64 kB/s */
+    SR_KHZ(5),      /* 160 kB/s */
+    SR_HZ(6400),    /* 204.8 kB/s, 68% of the 300 kB/s available */
 };
 
 static const int32_t probe_options[] = {
@@ -157,20 +134,6 @@ static gboolean lan_analog_in_use(const struct sr_dev_inst *sdi)
         const struct sr_channel *probe = l->data;
 
         if (probe->type == SR_CHANNEL_ANALOG && probe->enabled)
-            return TRUE;
-    }
-
-    return FALSE;
-}
-
-static gboolean lan_logic_in_use(const struct sr_dev_inst *sdi)
-{
-    const GSList *l;
-
-    for (l = sdi->channels; l; l = l->next) {
-        const struct sr_channel *probe = l->data;
-
-        if (probe->type == SR_CHANNEL_LOGIC && probe->enabled)
             return TRUE;
     }
 
@@ -308,13 +271,12 @@ static int lan_send_all(SOCKET fd, const void *data, int len)
     return SR_OK;
 }
 
-/* Write one 8 byte command record. */
-static int lan_send_cmd(struct gd32lan_context *devc, uint8_t cmd,
-                        uint8_t arg, uint32_t value)
+/* Write one 8 byte command record to one link. */
+static int lan_send_cmd_fd(SOCKET fd, uint8_t cmd, uint8_t arg, uint32_t value)
 {
     gd32la_cmd_t record;
 
-    if (devc->sock == INVALID_SOCKET)
+    if (fd == INVALID_SOCKET)
         return SR_ERR;
 
     record.cmd = cmd;
@@ -322,12 +284,26 @@ static int lan_send_cmd(struct gd32lan_context *devc, uint8_t cmd,
     record.reserved = 0;
     record.value = value;
 
-    if (lan_send_all(devc->sock, &record, (int)sizeof(record)) != SR_OK) {
+    if (lan_send_all(fd, &record, (int)sizeof(record)) != SR_OK) {
         sr_err("Failed to send command 0x%02x.", cmd);
         return SR_ERR;
     }
 
     return SR_OK;
+}
+
+/* Send a command to every open link. */
+static int lan_send_cmd(struct gd32lan_context *devc, uint8_t cmd,
+                        uint8_t arg, uint32_t value)
+{
+    int ret = SR_OK;
+
+    if (lan_send_cmd_fd(devc->sock, cmd, arg, value) != SR_OK)
+        ret = SR_ERR;
+    if (lan_send_cmd_fd(devc->sock2, cmd, arg, value) != SR_OK)
+        ret = SR_ERR;
+
+    return ret;
 }
 
 /* Read and discard whatever the serial server still has queued, so a new
@@ -405,14 +381,13 @@ static const char *lan_mode_name(guint8 mode)
     }
 }
 
-/* Wait for the header that answers GD32LA_CMD_START. Stale bytes left in
- * the serial server are skipped until the magic shows up. */
-static int lan_read_header(struct gd32lan_context *devc, guint8 stream_mode)
+/* Wait for the header that answers GD32LA_CMD_START on one link. Stale
+ * bytes left in the serial server are skipped until the magic shows up. */
+static int lan_read_header(SOCKET fd, guint8 stream_mode)
 {
     gd32la_hdr_t hdr;
     uint8_t window[4] = {0, 0, 0, 0};
     int waited = 0;
-    SOCKET fd = devc->sock;
 
 #ifdef _WIN32
     DWORD tv = GD32LAN_RECV_STEP_MS;
@@ -470,27 +445,26 @@ static int lan_read_header(struct gd32lan_context *devc, guint8 stream_mode)
                (unsigned int)hdr.version, (unsigned int)GD32LA_HDR_VERSION);
         return SR_ERR;
     }
-    if (hdr.channels != GD32LA_CHANNELS) {
-        sr_err("Device reports %u channels, expected %u.",
-               (unsigned int)hdr.channels, GD32LA_CHANNELS);
-        return SR_ERR;
-    }
     if (hdr.mode != stream_mode) {
         sr_err("Device streams %s data, requested %s.",
                lan_mode_name(hdr.mode), lan_mode_name(stream_mode));
         return SR_ERR;
     }
-    if (hdr.mode != GD32LA_MODE_LOGIC &&
-        hdr.analog_bits != GD32LA_ANALOG_BITS) {
+    if (hdr.analog_channels != GD32LA_ANALOG_CHANNELS) {
+        sr_err("Device reports %u analog channels, expected %u.",
+               (unsigned int)hdr.analog_channels,
+               (unsigned int)GD32LA_ANALOG_CHANNELS);
+        return SR_ERR;
+    }
+    if (hdr.analog_bits != GD32LA_ANALOG_BITS) {
         sr_err("Device streams %u bit analog samples, expected %u.",
                (unsigned int)hdr.analog_bits,
                (unsigned int)GD32LA_ANALOG_BITS);
         return SR_ERR;
     }
 
-    sr_info("Sample stream started: %u Hz, %s mode (device %s:%s).",
-            (unsigned int)hdr.samplerate, lan_mode_name(hdr.mode),
-            devc->host, devc->port);
+    sr_info("Sample stream started on this link: %u Hz, %s mode.",
+            (unsigned int)hdr.samplerate, lan_mode_name(hdr.mode));
     return SR_OK;
 }
 
@@ -516,181 +490,125 @@ static void lan_finish(struct gd32lan_context *devc)
     sr_session_source_remove(-1);
 }
 
-/* Split a received chunk into a logic payload and an analog payload and hand
- * both to the session. Mirrors la_forward() in gd32la.c, keep in sync: the
- * logic payload keeps DSView's cross layout (one 8 byte block per enabled
- * digital channel), the analog payload always carries every analog probe. */
-static void lan_forward(struct gd32lan_context *devc,
-                        const guint8 *raw, guint raw_len)
+/* Check the head of a queue for a complete frame. Drops leading bytes until
+ * the frame magic shows up (resynchronisation after a lost serial byte) and
+ * returns FALSE while less than a whole frame is queued. The caller must
+ * hold queue_lock. */
+static gboolean lan_head_frame(GByteArray *queue, uint32_t *seq)
+{
+    while (queue->len >= GD32LA_FRAME_HEADER_BYTES) {
+        if (queue->data[0] == GD32LA_FRAME_MAGIC0 &&
+            queue->data[1] == GD32LA_FRAME_MAGIC1) {
+            if (queue->len < GD32LA_ANALOG_FRAME_BYTES)
+                return FALSE;
+
+            *seq = (uint32_t)queue->data[2] |
+                   ((uint32_t)queue->data[3] << 8) |
+                   ((uint32_t)queue->data[4] << 16) |
+                   ((uint32_t)queue->data[5] << 24);
+            return TRUE;
+        }
+
+        g_byte_array_remove_index(queue, 0);
+    }
+
+    return FALSE;
+}
+
+/* Merge the frames of the two links back into one ordered stream and
+ * forward them to the session.
+ *
+ * The device alternates the frames between the links: link 0 carries the
+ * even sequence numbers, link 1 the odd ones. The merge therefore always
+ * waits for the frame with the expected sequence number on the link its
+ * parity points at - waiting is essential, a frame that has not arrived
+ * yet is not lost, and grabbing the other link's newer frame instead
+ * would turn a short delay into a permanent hole.
+ *
+ * A hole is only declared when the expected frame can never arrive any
+ * more: either the next frame of the same link shows up (the frames in
+ * between were lost on that serial link) or the link itself died. A hole
+ * just shortens the capture, it never garbles the stream. */
+static void lan_forward_frames(struct gd32lan_context *devc)
 {
     struct sr_datafeed_packet packet;
-    struct sr_datafeed_logic logic;
     struct sr_datafeed_analog analog;
-    guint8 *logic_buf;
-    guint8 *analog_buf;
-    guint8 *scratch;
-    guint8 *lp;
-    guint8 *ap;
-    const guint8 *stream = raw;
-    guint len = raw_len;
-    guint group_bytes;
-    guint groups, used;
-    guint64 samples = 0;
-    guint i, ch;
 
-    switch (devc->stream_mode) {
-    case GD32LA_MODE_MIXED:
-        group_bytes = GD32LA_MIXED_GROUP_BYTES;
-        break;
-    case GD32LA_MODE_ANALOG:
-        group_bytes = GD32LA_ANALOG_GROUP_BYTES;
-        break;
-    default:
-        group_bytes = GD32LA_GROUP_BYTES;
-        break;
-    }
+    for (;;) {
+        uint32_t expected = devc->seq_valid ? (devc->last_seq + 1) : 0;
+        uint32_t link = expected & 1u;
+        GByteArray *q = link ? devc->queue2 : devc->queue;
+        gboolean dead = link ? devc->rx_done2 : devc->rx_done;
+        uint32_t seq = 0;
+        gboolean have, forward = FALSE;
 
-    logic_buf = g_try_malloc(len + GD32LA_MIXED_GROUP_BYTES);
-    analog_buf = g_try_malloc(len + GD32LA_MIXED_GROUP_BYTES);
-    scratch = g_try_malloc(len + GD32LA_MIXED_GROUP_BYTES);
-    if (logic_buf == NULL || analog_buf == NULL || scratch == NULL) {
-        sr_err("Out of memory in the forward path.");
-        g_free(logic_buf);
-        g_free(analog_buf);
-        g_free(scratch);
-        return;
-    }
+        g_mutex_lock(&devc->queue_lock);
+        have = lan_head_frame(q, &seq);
 
-    lp = logic_buf;
-    ap = analog_buf;
+        /* The expected frame can never arrive when its link is dead; fall
+         * back to the other link so a broken cable does not wedge the
+         * capture. */
+        if (!have && dead) {
+            q = link ? devc->queue : devc->queue2;
+            have = lan_head_frame(q, &seq);
+        }
 
-    /* Finish the group the previous chunk left open, if any. */
-    if (devc->carry_len > 0) {
-        memcpy(scratch, devc->carry, devc->carry_len);
-        memcpy(scratch + devc->carry_len, raw, len);
-        len += devc->carry_len;
-        stream = scratch;
-        devc->carry_len = 0;
-    }
+        if (have) {
+            if (!devc->seq_valid || (int32_t)(seq - expected) >= 0) {
+                if (devc->seq_valid && seq != expected) {
+                    uint32_t lost = seq - expected;
 
-    groups = len / group_bytes;
-    used = groups * group_bytes;
-
-    if (len > used) {
-        memcpy(devc->carry, stream + used, len - used);
-        devc->carry_len = len - used;
-    }
-
-    switch (devc->stream_mode) {
-    case GD32LA_MODE_MIXED: {
-        for (i = 0; i < groups; i++) {
-            const guint8 *grp = stream + i * GD32LA_MIXED_GROUP_BYTES;
-
-            /* full cross block: 8 bytes per enabled digital channel */
-            for (ch = 0; ch < GD32LA_CHANNELS; ch++) {
-                if (devc->logic_mask & (1u << ch)) {
-                    memcpy(lp, grp + ch * GD32LA_BYTES_PER_CHANNEL,
-                           GD32LA_BYTES_PER_CHANNEL);
-                    lp += GD32LA_BYTES_PER_CHANNEL;
+                    devc->frames_lost += lost;
+                    sr_warn("%u frame(s) lost before seq %u.",
+                            (unsigned int)lost, (unsigned int)seq);
                 }
-            }
 
-            /* the 64 analog sample pairs of the same instants */
-            memcpy(ap, grp + GD32LA_GROUP_BYTES,
-                   GD32LA_ANALOG_GROUP_BYTES * GD32LA_GROUP_SAMPLES);
-            ap += GD32LA_ANALOG_GROUP_BYTES * GD32LA_GROUP_SAMPLES;
-        }
-
-        samples = (guint64)groups * GD32LA_GROUP_SAMPLES;
-        break;
-    }
-
-    case GD32LA_MODE_ANALOG: {
-        for (i = 0; i < groups; i++) {
-            const guint8 *grp = stream + i * GD32LA_ANALOG_GROUP_BYTES;
-
-            for (ch = 0; ch < GD32LA_ANALOG_CHANNELS; ch++) {
-                memcpy(ap, grp + ch * GD32LA_ANALOG_BYTES,
-                       GD32LA_ANALOG_BYTES);
-                ap += GD32LA_ANALOG_BYTES;
+                memcpy(devc->frame_buf,
+                       q->data + GD32LA_FRAME_HEADER_BYTES,
+                       sizeof(devc->frame_buf));
+                g_byte_array_remove_range(q, 0, GD32LA_ANALOG_FRAME_BYTES);
+                devc->last_seq = seq;
+                devc->seq_valid = TRUE;
+                forward = TRUE;
+            } else {
+                /* a lagging duplicate, drop it and wait for the next */
+                g_byte_array_remove_range(q, 0, GD32LA_ANALOG_FRAME_BYTES);
             }
         }
+        g_mutex_unlock(&devc->queue_lock);
 
-        samples = groups;
-        break;
-    }
+        if (!forward)
+            return;
 
-    default: {
-        for (i = 0; i < groups; i++) {
-            const guint8 *grp = stream + i * GD32LA_GROUP_BYTES;
-
-            for (ch = 0; ch < GD32LA_CHANNELS; ch++) {
-                if (devc->logic_mask & (1u << ch)) {
-                    memcpy(lp, grp + ch * GD32LA_BYTES_PER_CHANNEL,
-                           GD32LA_BYTES_PER_CHANNEL);
-                    lp += GD32LA_BYTES_PER_CHANNEL;
-                }
-            }
-        }
-
-        samples = (guint64)groups * GD32LA_GROUP_SAMPLES;
-        break;
-    }
-    }
-
-    packet.status = SR_PKT_OK;
-
-    if (samples > 0 && lp > logic_buf) {
-        logic.length = (uint64_t)(lp - logic_buf);
-        logic.format = LA_CROSS_DATA;
-        logic.index = 0;
-        logic.order = 0;
-        logic.unitsize = 1;
-        logic.data_error = 0;
-        logic.error_pattern = 0;
-        logic.data = logic_buf;
-
-        packet.type = SR_DF_LOGIC;
-        packet.payload = &logic;
-        ds_data_forward(devc->sdi, &packet);
-    }
-
-    if (samples > 0 && ap > analog_buf) {
         analog.probes = devc->sdi->channels;
-        analog.num_samples = (uint64_t)((ap - analog_buf) /
-                                        (GD32LA_ANALOG_CHANNELS *
-                                         GD32LA_ANALOG_BYTES));
+        analog.num_samples = GD32LA_FRAME_SAMPLES;
         analog.unit_bits = GD32LA_ANALOG_BITS;
         analog.unit_pitch = 0;
         analog.mq = SR_MQ_VOLTAGE;
         analog.unit = SR_UNIT_VOLT;
         analog.mqflags = SR_MQFLAG_AC;
-        analog.data = analog_buf;
+        analog.data = devc->frame_buf;
 
+        packet.status = SR_PKT_OK;
         packet.type = SR_DF_ANALOG;
         packet.payload = &analog;
         ds_data_forward(devc->sdi, &packet);
+
+        devc->sent_samples += GD32LA_FRAME_SAMPLES;
     }
-
-    devc->sent_samples += samples;
-
-    g_free(logic_buf);
-    g_free(analog_buf);
-    g_free(scratch);
 }
-
-/* Receive thread: pump the socket into the session visible queue. */
-static gpointer lan_rx_thread(gpointer data)
+/* Receive threads: each pumps one socket into its session visible queue. */
+static void lan_rx_pump(struct gd32lan_context *devc, SOCKET sock,
+                        GByteArray *queue)
 {
-    struct gd32lan_context *devc = data;
     uint8_t buf[4096];
 
     while (!devc->abort) {
-        int n = recv(devc->sock, (char *)buf, (int)sizeof(buf), 0);
+        int n = recv(sock, (char *)buf, (int)sizeof(buf), 0);
 
         if (n > 0) {
             g_mutex_lock(&devc->queue_lock);
-            g_byte_array_append(devc->queue, buf, (guint)n);
+            g_byte_array_append(queue, buf, (guint)n);
             g_mutex_unlock(&devc->queue_lock);
             continue;
         }
@@ -698,30 +616,45 @@ static gpointer lan_rx_thread(gpointer data)
         /* 0 = orderly shutdown, < 0 = error or our own closesocket */
         break;
     }
+}
 
+static gpointer lan_rx_thread(gpointer data)
+{
+    struct gd32lan_context *devc = data;
+
+    lan_rx_pump(devc, devc->sock, devc->queue);
     devc->rx_done = TRUE;
     return NULL;
 }
 
-/* Stop the device stream and give the serial server time to push the
- * command out before the TCP connection goes away. Without this the
+static gpointer lan_rx_thread2(gpointer data)
+{
+    struct gd32lan_context *devc = data;
+
+    lan_rx_pump(devc, devc->sock2, devc->queue2);
+    devc->rx_done2 = TRUE;
+    return NULL;
+}
+
+/* Stop the device stream and give the serial servers time to push the
+ * command out before the TCP connections go away. Without this the
  * device keeps transmitting at full rate after DSView stopped reading,
  * because nothing tells it to stop. */
 static void lan_send_stop(struct gd32lan_context *devc)
 {
-    if (devc->sock != INVALID_SOCKET) {
+    if (devc->sock != INVALID_SOCKET || devc->sock2 != INVALID_SOCKET) {
         lan_send_cmd(devc, GD32LA_CMD_STOP, 0, 0);
         g_usleep(GD32LAN_STOP_LINGER_MS * 1000);
     }
 }
 
-/* Timer driven session source: drain the queue in the session thread. */
+/* Timer driven session source: merge the frames of both links and forward
+ * them in the session thread. */
 static int lan_receive_data(int fd, int revents, const struct sr_dev_inst *sdi)
 {
     struct gd32lan_context *devc = sdi->priv;
-    guint8 *data = NULL;
-    guint len = 0;
-    gboolean queue_empty;
+    gboolean queues_empty;
+    gboolean all_dead;
 
     (void)fd;
 
@@ -739,7 +672,7 @@ static int lan_receive_data(int fd, int revents, const struct sr_dev_inst *sdi)
      * can fire far slower than the requested interval, and a counter then
      * lets the device watchdog expire before the first PING is sent. */
     if (!devc->abort && !devc->limit_reached && !devc->ended &&
-        devc->sock != INVALID_SOCKET) {
+        (devc->sock != INVALID_SOCKET || devc->sock2 != INVALID_SOCKET)) {
         gint64 now = g_get_monotonic_time();
 
         if (now - devc->last_ping_us >= GD32LAN_KEEPALIVE_US) {
@@ -749,41 +682,38 @@ static int lan_receive_data(int fd, int revents, const struct sr_dev_inst *sdi)
         }
     }
 
-    /* steal whatever the receive thread collected */
-    g_mutex_lock(&devc->queue_lock);
-    len = devc->queue->len;
-    if (len > 0) {
-        data = g_try_malloc(len);
-        if (data != NULL)
-            memcpy(data, devc->queue->data, len);
-        else
-            len = 0;
-        g_byte_array_set_size(devc->queue, 0);
+    /* one link dying mid capture does not end the capture: the other one
+     * keeps delivering frames, only with holes in the sequence */
+    if (!devc->link_warned && !devc->abort && !devc->limit_reached &&
+        !devc->ended && (devc->rx_done || devc->rx_done2)) {
+        devc->link_warned = TRUE;
+        sr_warn("One serial link died mid capture, continuing on the other "
+                "one at the cost of lost frames.");
     }
-    g_mutex_unlock(&devc->queue_lock);
 
-    if (data != NULL && !devc->abort && !devc->limit_reached) {
-        lan_forward(devc, data, len);
+    if (!devc->abort && !devc->limit_reached)
+        lan_forward_frames(devc);
 
-        if (!devc->is_loop && devc->limit_samples > 0 &&
-            devc->sent_samples >= devc->limit_samples) {
-            sr_info("Sample limit reached (%" PRIu64 " samples).",
-                    devc->sent_samples);
-            devc->limit_reached = TRUE;
-        }
+    if (!devc->is_loop && devc->limit_samples > 0 &&
+        devc->sent_samples >= devc->limit_samples) {
+        sr_info("Sample limit reached (%" PRIu64 " samples).",
+                devc->sent_samples);
+        devc->limit_reached = TRUE;
     }
-    g_free(data);
 
     g_mutex_lock(&devc->queue_lock);
-    queue_empty = (devc->queue->len == 0);
+    queues_empty = (devc->queue->len == 0 && devc->queue2->len == 0);
     g_mutex_unlock(&devc->queue_lock);
+
+    all_dead = devc->rx_done && devc->rx_done2;
 
     if (!devc->ended &&
         (devc->abort || devc->limit_reached ||
-         (devc->rx_done && queue_empty))) {
-        if (devc->rx_done && !devc->abort && !devc->limit_reached)
-            sr_err("Link to %s:%s lost.", devc->host, devc->port);
-        /* tell the device to stop streaming before the link goes away,
+         (all_dead && queues_empty))) {
+        if (all_dead && !devc->abort && !devc->limit_reached)
+            sr_err("Links to %s:%s and %s:%s lost.",
+                   devc->host, devc->port, devc->host, devc->port2);
+        /* tell the device to stop streaming before the links go away,
          * otherwise it transmits forever (serial links have no
          * disconnect state the device could notice) */
         lan_send_stop(devc);
@@ -798,8 +728,8 @@ static int lan_receive_data(int fd, int revents, const struct sr_dev_inst *sdi)
  * Link setup / teardown
  * ---------------------------------------------------------------------- */
 
-/* Close the connection and join the receive thread. Idempotent, callable
- * from the session source as well as from the stop callback. */
+/* Close both connections and join both receive threads. Idempotent,
+ * callable from the session source as well as from the stop callback. */
 static void lan_stop_link(struct gd32lan_context *devc)
 {
     if (devc->sock != INVALID_SOCKET) {
@@ -808,57 +738,96 @@ static void lan_stop_link(struct gd32lan_context *devc)
         devc->sock = INVALID_SOCKET;
     }
 
+    if (devc->sock2 != INVALID_SOCKET) {
+        shutdown(devc->sock2, 2 /* SD_BOTH / SHUT_RDWR */);
+        closesocket(devc->sock2);
+        devc->sock2 = INVALID_SOCKET;
+    }
+
     if (devc->rx_thread != NULL) {
         g_thread_join(devc->rx_thread);
         devc->rx_thread = NULL;
     }
+
+    if (devc->rx_thread2 != NULL) {
+        g_thread_join(devc->rx_thread2);
+        devc->rx_thread2 = NULL;
+    }
+}
+
+/* Put a freshly connected socket back into blocking mode with no receive
+ * timeout for the streaming phase. */
+static void lan_set_blocking_stream(SOCKET fd)
+{
+#ifdef _WIN32
+    DWORD tv = 0;
+
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof(tv));
+#else
+    struct timeval tv;
+
+    tv.tv_sec = 0;
+    tv.tv_usec = 0;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+#endif
 }
 
 static int lan_start_link(struct gd32lan_context *devc)
 {
     int ret;
 
+    /* link 0: even frame numbers */
     ret = lan_connect(devc->host, devc->port, &devc->sock);
     if (ret != SR_OK)
         return ret;
 
-    devc->rx_done = FALSE;
+    /* link 1: odd frame numbers */
+    ret = lan_connect(devc->host, devc->port2, &devc->sock2);
+    if (ret != SR_OK) {
+        closesocket(devc->sock);
+        devc->sock = INVALID_SOCKET;
+        return ret;
+    }
 
-    /* Stop whatever the device was doing and flush the serial server, so
-     * the header of the new stream is the first thing we read. */
+    devc->rx_done = FALSE;
+    devc->rx_done2 = FALSE;
+
+    /* Stop whatever the device was doing and flush both serial servers, so
+     * the header of the new stream is the first thing we read on each link. */
     lan_send_cmd(devc, GD32LA_CMD_STOP, 0, 0);
     lan_drain(devc->sock);
+    lan_drain(devc->sock2);
 
-    ret = lan_send_cmd(devc, GD32LA_CMD_START, devc->stream_mode,
-                       (uint32_t)devc->samplerate);
-    if (ret != SR_OK)
+    /* The device accepts START on either link and restarts both streams,
+     * so both links get the command and answer with the header. */
+    if (lan_send_cmd_fd(devc->sock, GD32LA_CMD_START, devc->stream_mode,
+                        (uint32_t)devc->samplerate) != SR_OK) {
+        ret = SR_ERR;
         goto err;
+    }
+    if (lan_send_cmd_fd(devc->sock2, GD32LA_CMD_START, devc->stream_mode,
+                        (uint32_t)devc->samplerate) != SR_OK) {
+        ret = SR_ERR;
+        goto err;
+    }
 
-    ret = lan_read_header(devc, devc->stream_mode);
-    if (ret != SR_OK)
+    if (lan_read_header(devc->sock, devc->stream_mode) != SR_OK) {
+        ret = SR_ERR;
         goto err;
+    }
+    if (lan_read_header(devc->sock2, devc->stream_mode) != SR_OK) {
+        ret = SR_ERR;
+        goto err;
+    }
 
     /* back to blocking with no timeout for the streaming phase */
-#ifdef _WIN32
-    {
-        DWORD tv = 0;
+    lan_set_blocking_stream(devc->sock);
+    lan_set_blocking_stream(devc->sock2);
 
-        setsockopt(devc->sock, SOL_SOCKET, SO_RCVTIMEO,
-                   (const char *)&tv, sizeof(tv));
-    }
-#else
-    {
-        struct timeval tv;
-
-        tv.tv_sec = 0;
-        tv.tv_usec = 0;
-        setsockopt(devc->sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    }
-#endif
-
-    devc->rx_thread = g_thread_new("gd32lan-rx", lan_rx_thread, devc);
-    if (devc->rx_thread == NULL) {
-        sr_err("Failed to start the receive thread.");
+    devc->rx_thread = g_thread_new("gd32lan-rx0", lan_rx_thread, devc);
+    devc->rx_thread2 = g_thread_new("gd32lan-rx1", lan_rx_thread2, devc);
+    if (devc->rx_thread == NULL || devc->rx_thread2 == NULL) {
+        sr_err("Failed to start the receive threads.");
         ret = SR_ERR;
         goto err;
     }
@@ -923,6 +892,7 @@ static GSList *hw_scan(GSList *options)
     GSList *devices = NULL;
     const char *host;
     const char *port;
+    const char *port2;
 
     (void)options;
 
@@ -941,28 +911,35 @@ static GSList *hw_scan(GSList *options)
 
     host = g_getenv("GD32LA_HOST");
     port = g_getenv("GD32LA_PORT");
+    port2 = g_getenv("GD32LA_PORT2");
     if (host == NULL || *host == '\0')
         host = GD32LAN_DEFAULT_HOST;
     if (port == NULL || *port == '\0')
         port = GD32LAN_DEFAULT_PORT;
+    if (port2 == NULL || *port2 == '\0')
+        port2 = GD32LAN_DEFAULT_PORT2;
 
     g_strlcpy(devc->host, host, sizeof(devc->host));
     g_strlcpy(devc->port, port, sizeof(devc->port));
+    g_strlcpy(devc->port2, port2, sizeof(devc->port2));
 
-    devc->samplerate = GD32LAN_DEFAULT_SAMPLERATE;
-    devc->limit_samples = GD32LAN_DEFAULT_LIMIT;
-    devc->channels_enabled = GD32LA_CHANNELS;
-    devc->stream_mode = GD32LA_MODE_MIXED;
+    devc->samplerate = GD32LAN_DEFAULT_ASRATE;
+    devc->limit_samples = GD32LAN_DEFAULT_ALIMIT;
+    devc->channels_enabled = GD32LA_ANALOG_CHANNELS;
+    devc->stream_mode = GD32LA_MODE_ANALOG;
     devc->is_loop = FALSE;
     devc->ended = TRUE;
     devc->sock = INVALID_SOCKET;
+    devc->sock2 = INVALID_SOCKET;
     devc->queue = g_byte_array_new();
+    devc->queue2 = g_byte_array_new();
     g_mutex_init(&devc->queue_lock);
 
-    sdi = sr_dev_inst_new(LOGIC, SR_ST_INACTIVE, "GigaDevice",
-                          "GD32F470 LA Simulator (network)", "1.0");
+    sdi = sr_dev_inst_new(ANALOG, SR_ST_INACTIVE, "GigaDevice",
+                          "GD32F470 16ch DA Simulator (network)", "1.1");
     if (sdi == NULL) {
         g_byte_array_free(devc->queue, TRUE);
+        g_byte_array_free(devc->queue2, TRUE);
         g_mutex_clear(&devc->queue_lock);
         g_free(devc);
         return NULL;
@@ -978,8 +955,8 @@ static GSList *hw_scan(GSList *options)
 
     drvc->sdi = sdi;
 
-    sr_info("Registered network device, will connect to %s:%s.",
-            devc->host, devc->port);
+    sr_info("Registered network device, will connect to %s:%s and %s:%s.",
+            devc->host, devc->port, devc->host, devc->port2);
 
     devices = g_slist_append(devices, sdi);
 
@@ -992,7 +969,7 @@ static const GSList *hw_dev_mode_list(const struct sr_dev_inst *sdi)
 
     (void)sdi;
 
-    l = g_slist_append(l, (gpointer)&sr_mode_list[0]);   /* LOGIC  */
+    /* Analog data acquisition only: 16 channels, 16 bit. */
     l = g_slist_append(l, (gpointer)&sr_mode_list[1]);   /* ANALOG */
 
     return l;
@@ -1017,38 +994,18 @@ static void lan_setup_analog_probe(struct sr_channel *probe)
     probe->map_max = 5.0;
 }
 
-/* Same channel model as the USB driver: LOGIC mode exposes the two digital
- * probes plus the two analog probes (mixed stream), ANALOG mode the analog
- * probes only. */
+/* Analog data acquisition only: the 16 analog probes. */
 static void lan_rebuild_channels(struct sr_dev_inst *sdi)
 {
     struct gd32lan_context *devc = sdi->priv;
-    gboolean with_logic = (sdi->mode != ANALOG);
     guint16 j;
 
     sr_dev_probes_free(sdi);
 
-    if (with_logic) {
-        for (j = 0; j < GD32LA_CHANNELS; j++) {
-            struct sr_channel *probe;
-
-            probe = sr_channel_new(j, SR_CHANNEL_LOGIC, TRUE,
-                                   logic_probe_names[j]);
-            if (probe == NULL) {
-                sr_err("Failed to create channel %u.", (unsigned int)j);
-                return;
-            }
-
-            probe->bits = 1;
-            sdi->channels = g_slist_append(sdi->channels, probe);
-        }
-    }
-
     for (j = 0; j < GD32LA_ANALOG_CHANNELS; j++) {
         struct sr_channel *probe;
-        guint16 index = with_logic ? (guint16)(GD32LA_CHANNELS + j) : j;
 
-        probe = sr_channel_new(index, SR_CHANNEL_ANALOG, TRUE,
+        probe = sr_channel_new(j, SR_CHANNEL_ANALOG, TRUE,
                                analog_probe_names[j]);
         if (probe == NULL) {
             sr_err("Failed to create analog channel %u.", (unsigned int)j);
@@ -1060,7 +1017,7 @@ static void lan_rebuild_channels(struct sr_dev_inst *sdi)
     }
 
     if (devc != NULL)
-        devc->channels_enabled = GD32LA_CHANNELS;
+        devc->channels_enabled = GD32LA_ANALOG_CHANNELS;
 }
 
 static int hw_dev_open(struct sr_dev_inst *sdi)
@@ -1103,6 +1060,8 @@ static int dev_destroy(struct sr_dev_inst *sdi)
     if (devc != NULL) {
         if (devc->queue != NULL)
             g_byte_array_free(devc->queue, TRUE);
+        if (devc->queue2 != NULL)
+            g_byte_array_free(devc->queue2, TRUE);
         g_mutex_clear(&devc->queue_lock);
     }
 
@@ -1114,63 +1073,24 @@ static int dev_destroy(struct sr_dev_inst *sdi)
     return SR_OK;
 }
 
-/* Decide how the capture has to be streamed, based on the enabled probes. */
+/* The device streams analog frames only; check that at least one analog
+ * channel is enabled. */
 static int lan_pick_stream_mode(struct sr_dev_inst *sdi)
 {
     struct gd32lan_context *devc = sdi->priv;
-    gboolean logic = lan_logic_in_use(sdi);
-    gboolean analog = lan_analog_in_use(sdi);
 
-    if (logic && analog) {
-        devc->stream_mode = GD32LA_MODE_MIXED;
-    } else if (logic) {
-        devc->stream_mode = GD32LA_MODE_LOGIC;
-    } else if (analog) {
-        if (sdi->mode == LOGIC) {
-            sr_err("Enable at least one digital channel, or switch the device "
-                   "mode to Data Acquisition.");
-            return SR_ERR_ARG;
-        }
-        devc->stream_mode = GD32LA_MODE_ANALOG;
-    } else {
+    if (!lan_analog_in_use(sdi)) {
         sr_err("No channel enabled.");
         return SR_ERR_ARG;
     }
 
+    devc->stream_mode = GD32LA_MODE_ANALOG;
     return SR_OK;
-}
-
-/* Build the bit masks of the channels that go into each payload. The analog
- * payload always carries every analog probe, DSView keeps a slot per probe. */
-static void lan_build_masks(struct sr_dev_inst *sdi)
-{
-    struct gd32lan_context *devc = sdi->priv;
-    const GSList *l;
-    guint logic_index = 0;
-    guint analog_index = 0;
-
-    devc->logic_mask = 0;
-    devc->analog_mask = 0;
-
-    for (l = sdi->channels; l; l = l->next) {
-        const struct sr_channel *probe = l->data;
-
-        if (probe->type == SR_CHANNEL_LOGIC) {
-            if (probe->enabled && logic_index < GD32LA_CHANNELS)
-                devc->logic_mask |= (guint8)(1u << logic_index);
-            logic_index++;
-        } else if (probe->type == SR_CHANNEL_ANALOG) {
-            if (analog_index < GD32LA_ANALOG_CHANNELS)
-                devc->analog_mask |= (guint8)(1u << analog_index);
-            analog_index++;
-        }
-    }
 }
 
 static int hw_dev_acquisition_start(struct sr_dev_inst *sdi, void *cb_data)
 {
     struct gd32lan_context *devc = sdi->priv;
-    uint64_t max_rate;
     int ret;
 
     (void)cb_data;
@@ -1186,55 +1106,42 @@ static int hw_dev_acquisition_start(struct sr_dev_inst *sdi, void *cb_data)
     devc->abort = FALSE;
     devc->limit_reached = FALSE;
     devc->ended = FALSE;
-    devc->carry_len = 0;
     devc->last_ping_us = 0;
+    devc->last_seq = 0;
+    devc->seq_valid = FALSE;
+    devc->link_warned = FALSE;
+    devc->frames_lost = 0;
 
-    /* Drop whatever the receive thread collected after the last poll of the
-     * previous capture. Nobody consumed those bytes (the session source is
-     * removed at the end of a capture), and their length is arbitrary, so
-     * letting them head the next stream shifts the group boundary by a
-     * non-multiple of the group size. Every following group is then cut at
-     * the wrong offset and the whole capture is garbled, which is why the
-     * first capture looks fine and every later one does not. */
+    /* Drop whatever the receive threads collected after the last poll of
+     * the previous capture. Nobody consumed those bytes (the session source
+     * is removed at the end of a capture), and their length is arbitrary,
+     * so letting them head the next stream breaks the frame alignment. */
     g_mutex_lock(&devc->queue_lock);
     g_byte_array_set_size(devc->queue, 0);
+    g_byte_array_set_size(devc->queue2, 0);
     g_mutex_unlock(&devc->queue_lock);
 
     ret = lan_pick_stream_mode(sdi);
     if (ret != SR_OK)
         return ret;
 
-    lan_build_masks(sdi);
-
-    /* Clamp to what the 460800 baud serial link can carry. */
-    switch (devc->stream_mode) {
-    case GD32LA_MODE_MIXED:
-        max_rate = GD32LA_UART_MAX_MIXED_RATE;
-        break;
-    case GD32LA_MODE_ANALOG:
-        max_rate = GD32LA_UART_MAX_ANALOG_RATE;
-        break;
-    default:
-        max_rate = GD32LA_UART_MAX_LOGIC_RATE;
-        break;
-    }
-
-    if (devc->samplerate > max_rate) {
-        sr_warn("The %s stream tops out at %" PRIu64 " Hz over the serial "
-                "link, clamping the samplerate.",
-                lan_mode_name(devc->stream_mode), max_rate);
-        devc->samplerate = max_rate;
+    /* Clamp to what the two 1500000 baud serial links can carry. */
+    if (devc->samplerate > GD32LA_UART_MAX_ANALOG_RATE) {
+        sr_warn("The analog stream tops out at %u Hz over the serial links, "
+                "clamping the samplerate.",
+                (unsigned int)GD32LA_UART_MAX_ANALOG_RATE);
+        devc->samplerate = GD32LA_UART_MAX_ANALOG_RATE;
     }
     if (devc->samplerate < GD32LAN_MIN_SAMPLERATE)
-        devc->samplerate = GD32LAN_DEFAULT_SAMPLERATE;
-    if (devc->stream_mode != GD32LA_MODE_LOGIC && devc->limit_samples == 0)
+        devc->samplerate = GD32LAN_DEFAULT_ASRATE;
+    if (devc->limit_samples == 0)
         devc->limit_samples = GD32LAN_DEFAULT_ALIMIT;
 
     sr_info("Starting acquisition: %" PRIu64 " Hz, limit %" PRIu64
-            " samples, %s mode (logic mask 0x%x, analog mask 0x%x).",
+            " samples, %s mode on two links (%s:%s and %s:%s).",
             devc->samplerate, devc->limit_samples,
             lan_mode_name(devc->stream_mode),
-            devc->logic_mask, devc->analog_mask);
+            devc->host, devc->port, devc->host, devc->port2);
 
     ret = lan_start_link(devc);
     if (ret != SR_OK) {
@@ -1311,23 +1218,18 @@ static int config_get(int id, GVariant **data, const struct sr_dev_inst *sdi,
         *data = g_variant_new_uint64(devc->limit_samples);
         break;
     case SR_CONF_HW_DEPTH:
-        *data = g_variant_new_uint64((sdi->mode == LOGIC &&
-                                      analog_probes > 0) ?
-                                     GD32LAN_MAX_MIXED_SAMPLES :
-                                     GD32LAN_MAX_SAMPLES);
+        *data = g_variant_new_uint64(GD32LAN_MAX_SAMPLES);
         break;
     case SR_CONF_DEVICE_MODE:
         *data = g_variant_new_int16(sdi->mode);
         break;
     case SR_CONF_UNIT_BITS:
-        *data = g_variant_new_byte((analog_probes > 0) ?
-                                   GD32LA_ANALOG_BITS : 1);
+        *data = g_variant_new_byte(GD32LA_ANALOG_BITS);
         break;
     case SR_CONF_MAX_HEIGHT_VALUE:
-        /* Row height is (value + 1) * 20 px; a mixed capture needs room for
-         * the analog waveforms. */
-        *data = g_variant_new_byte((sdi->mode == LOGIC && analog_probes > 0) ?
-                                   4 : 1);
+        /* Row height is (value + 1) * 20 px; the analog waveforms need
+         * room to breathe. */
+        *data = g_variant_new_byte(1);
         break;
     case SR_CONF_VLD_CH_NUM:
         *data = g_variant_new_int16((int16_t)(logic_probes + analog_probes));
@@ -1425,24 +1327,18 @@ static int config_set(int id, GVariant *data, struct sr_dev_inst *sdi,
         break;
     case SR_CONF_DEVICE_MODE:
         mode = g_variant_get_int16(data);
-        if (mode != LOGIC && mode != ANALOG) {
-            sr_err("Unsupported work mode %d.", mode);
+        if (mode != ANALOG) {
+            sr_err("Unsupported work mode %d, the device is analog only.",
+                   mode);
             return SR_ERR_ARG;
         }
         if (sdi->mode != mode) {
             sdi->mode = mode;
             lan_rebuild_channels(sdi);
+            devc->samplerate = GD32LAN_DEFAULT_ASRATE;
+            devc->limit_samples = GD32LAN_DEFAULT_ALIMIT;
 
-            if (mode == ANALOG) {
-                devc->samplerate = GD32LAN_DEFAULT_ASRATE;
-                devc->limit_samples = GD32LAN_DEFAULT_ALIMIT;
-            } else {
-                devc->samplerate = GD32LAN_DEFAULT_SAMPLERATE;
-                devc->limit_samples = GD32LAN_DEFAULT_LIMIT;
-            }
-
-            sr_info("Work mode set to %s.",
-                    (mode == ANALOG) ? "analog" : "logic");
+            sr_info("Work mode set to analog.");
         }
         break;
     case SR_CONF_LOOP_MODE:
@@ -1521,24 +1417,11 @@ static int config_list(int key, GVariant **data, const struct sr_dev_inst *sdi,
 {
     GVariant *gvar;
     GVariantBuilder gvb;
-    const uint64_t *rates;
-    gsize rate_count;
 
     (void)cg;
 
     if (sdi == NULL)
         return SR_ERR_ARG;
-
-    if (sdi->mode == ANALOG) {
-        rates = analog_samplerates;
-        rate_count = ARRAY_SIZE(analog_samplerates);
-    } else if (lan_analog_in_use(sdi)) {
-        rates = mixed_samplerates;
-        rate_count = ARRAY_SIZE(mixed_samplerates);
-    } else {
-        rates = logic_samplerates;
-        rate_count = ARRAY_SIZE(logic_samplerates);
-    }
 
     switch (key) {
     case SR_CONF_DEVICE_SESSIONS:
@@ -1551,8 +1434,10 @@ static int config_list(int key, GVariant **data, const struct sr_dev_inst *sdi,
         return SR_ERR_NA;
     case SR_CONF_SAMPLERATE:
         g_variant_builder_init(&gvb, G_VARIANT_TYPE("a{sv}"));
-        gvar = g_variant_new_from_data(G_VARIANT_TYPE("at"), rates,
-                                       rate_count * sizeof(uint64_t),
+        gvar = g_variant_new_from_data(G_VARIANT_TYPE("at"),
+                                       analog_samplerates,
+                                       ARRAY_SIZE(analog_samplerates) *
+                                       sizeof(uint64_t),
                                        TRUE, NULL, NULL);
         g_variant_builder_add(&gvb, "{sv}", "samplerates", gvar);
         *data = g_variant_builder_end(&gvb);
@@ -1591,7 +1476,7 @@ static int config_list(int key, GVariant **data, const struct sr_dev_inst *sdi,
 
 SR_PRIV struct sr_dev_driver gd32lan_driver_info = {
     .name = "gd32lan",
-    .longname = "GD32F470 LA Simulator (network)",
+    .longname = "GD32F470 16ch DA Simulator (network)",
     .api_version = 1,
     .driver_type = DRIVER_TYPE_HARDWARE,
     .init = hw_init,

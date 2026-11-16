@@ -25,18 +25,18 @@
     it with a small buffer before switching to streaming reads. All packets
     that follow the header carry raw sample data only.
 
-    The device has three work modes, selected by the argument of
-    GD32LA_CMD_START:
+    The device streams analog samples only. The mode byte of
+    GD32LA_CMD_START selects the stream format:
 
-      GD32LA_MODE_LOGIC   2 digital channels, LA_CROSS_DATA layout
-      GD32LA_MODE_ANALOG  2 analog channels, 8 bit interleaved samples
-      GD32LA_MODE_MIXED   both of the above in one stream, so the host can
-                          display digital and analog traces side by side
+      GD32LA_MODE_ANALOG  16 analog channels, 16 bit interleaved samples
 
-    Logic sample layout (LA_CROSS_DATA, same as DreamSourceLab devices)
-    -----------------------------------------------------------------
-    The stream is a sequence of 8 byte blocks, one block per enabled channel,
-    channels rotating in ascending order:
+    GD32LA_MODE_LOGIC and GD32LA_MODE_MIXED are legacy single link formats
+    from the digital era and are no longer produced.
+
+    Logic sample layout (legacy, unused)
+    ------------------------------------
+    The stream used to be a sequence of 8 byte blocks, one block per enabled
+    channel, channels rotating in ascending order:
 
       [ch0 byte 0..7][ch1 byte 0..7][ch0 byte 8..15][ch1 byte 8..15] ...
 
@@ -57,25 +57,28 @@
     (unit_bits + 7) / 8 bytes per sample with the low byte first and maps
     0 .. 2^bits - 1 onto the full channel height.
 
-    Mixed sample layout
-    -------------------
-    A mixed group is exactly one logic cross block plus the matching analog
-    samples: GD32LA_GROUP_SAMPLES (64) samples, GD32LA_MIXED_GROUP_BYTES
-    (144) bytes long.
+    Analog frame layout (dual UART transport)
+    ------------------------------------------
+    The transport uses TWO serial links (USART2 on PB10/PB11 and USART1 on
+    PA2/PA3, both 1500000 8N1) because one link cannot carry 16 channels.
+    Frames alternate between the links: frame 0 goes out on link 0, frame 1
+    on link 1, frame 2 on link 0 again, and so on. Each link therefore runs
+    at half the sample data rate.
 
-      byte  0 ..  7          D0, 64 samples, bit 0 oldest
-      byte  8 .. 15          D1, 64 samples, bit 0 oldest
-      byte 16 + 2*n + 0      A0 sample n
-      byte 16 + 2*n + 1      A1 sample n        (n = 0 .. 63)
+    One frame is GD32LA_ANALOG_FRAME_BYTES (2054) bytes and holds
+    GD32LA_FRAME_SAMPLES (64) samples of every channel:
 
-    The logic part of the group has to stay a full cross block (8 bytes per
-    channel): DSView stores logic samples 64 at a time and reads one 8 byte
-    block per channel per step, so handing it one byte per channel makes it
-    splice neighbouring groups together and the digital traces turn into
-    noise.
+      byte  0          0xAA, frame magic, byte 1 is 0x55
+      byte  2 ..  5    frame sequence number, uint32 little endian, starts
+                       at 0 on every START and wraps at 2^32
+      byte  6 .. 2053  64 samples * 16 channels * 2 bytes, interleaved as
+                       above
 
-    Digital and analog stay in lockstep, so sample n of every channel of a
-    group belongs to the same instant on the DSView time axis.
+    The magic lets the receiver resynchronise after a lost byte: when the
+    first two bytes of a frame do not match, it drops one byte and looks
+    again. The sequence numbers let the host merge the two links back into
+    one ordered stream and tell lost frames apart (a hole in the sequence
+    shortens the capture instead of garbling it).
 */
 
 #ifndef LA_PROTO_H
@@ -107,34 +110,45 @@
 #define GD32LA_GROUP_BYTES             (GD32LA_CHANNELS * \
                                         GD32LA_BYTES_PER_CHANNEL)         /* 16 */
 
-/* Analog channel configuration. 16 bit unsigned samples, little endian. */
-#define GD32LA_ANALOG_CHANNELS         2U
+/* Analog channel configuration. 16 channels, 16 bit unsigned samples,
+ * little endian. */
+#define GD32LA_ANALOG_CHANNELS         16U
 #define GD32LA_ANALOG_BITS             16U
 #define GD32LA_ANALOG_BYTES            ((GD32LA_ANALOG_BITS + 7U) / 8U)   /* 2 */
 #define GD32LA_ANALOG_MID              32768U
 #define GD32LA_ANALOG_GROUP_BYTES      (GD32LA_ANALOG_CHANNELS * \
-                                        GD32LA_ANALOG_BYTES)              /* 4 */
+                                        GD32LA_ANALOG_BYTES)             /* 32 */
 
-/* Mixed group: one complete logic cross block followed by the analog samples
- * of the same 64 instants. 16 + 4 * 64 = 272 bytes per 64 samples. */
+/* One frame on the wire: 6 byte frame header + 64 samples of all channels.
+ * The frames alternate between the two UART links, see the header comment. */
+#define GD32LA_FRAME_MAGIC0            0xAAU
+#define GD32LA_FRAME_MAGIC1            0x55U
+#define GD32LA_FRAME_HEADER_BYTES      6U
+#define GD32LA_FRAME_SAMPLES           64U
+#define GD32LA_ANALOG_FRAME_BYTES      (GD32LA_FRAME_HEADER_BYTES + \
+                                        GD32LA_ANALOG_GROUP_BYTES * \
+                                        GD32LA_GROUP_SAMPLES)             /* 2054 */
+
+/* Legacy mixed group of the digital era: one complete logic cross block
+ * followed by the analog samples of the same 64 instants. Unused, the
+ * analog stream is framed as above. */
 #define GD32LA_MIXED_GROUP_BYTES       (GD32LA_GROUP_BYTES + \
                                         GD32LA_ANALOG_GROUP_BYTES * \
-                                        GD32LA_GROUP_SAMPLES)             /* 144 */
+                                        GD32LA_GROUP_SAMPLES)
 
 /* Work modes, passed in the argument byte of GD32LA_CMD_START */
 #define GD32LA_MODE_LOGIC              0U
 #define GD32LA_MODE_ANALOG             1U
 #define GD32LA_MODE_MIXED              2U
 
-/* Samplerate ceilings of the UART transport (460800 8N1 = 46080 B/s gross,
- * keep roughly 20% head room for the serial server and its buffers):
- *   logic  rate / 4 B/s     -> 128 kSa/s = 32 kB/s
- *   analog rate * 4 B/s     ->  10 kSa/s = 40 kB/s
- *   mixed  rate * 4.25 B/s  ->  10 kSa/s = 42.5 kB/s
- * Both the firmware and the network driver clamp to these values. */
+/* Samplerate ceilings of the dual UART transport (2 x 1500000 8N1 =
+ * 300 kB/s gross, keep roughly 20% head room for the serial servers and
+ * their buffers):
+ *   analog rate * 32 B/s -> 6400 Sa/s = 204.8 kB/s (68%)
+ * The logic / mixed ceilings belong to the legacy single link formats. */
 #define GD32LA_UART_MAX_LOGIC_RATE     128000U
-#define GD32LA_UART_MAX_ANALOG_RATE    10000U
-#define GD32LA_UART_MAX_MIXED_RATE     10000U
+#define GD32LA_UART_MAX_ANALOG_RATE    6400U
+#define GD32LA_UART_MAX_MIXED_RATE     6400U
 
 /* Command ids */
 #define GD32LA_CMD_START               0x01U   /* arg = mode, value = samplerate */
@@ -150,8 +164,9 @@
 #define GD32LA_HDR_MAGIC1              'D'
 #define GD32LA_HDR_MAGIC2              'L'
 #define GD32LA_HDR_MAGIC3              'A'
-/* 5: analog samples are 16 bit wide (2 bytes each) instead of 8 bit */
-#define GD32LA_HDR_VERSION             5U
+/* 6: 16 analog channels, no digital channels, frames carry a magic and a
+ *    sequence number and alternate between two UART links */
+#define GD32LA_HDR_VERSION             6U
 #define GD32LA_HDR_LEN                 20U
 
 #if defined(__GNUC__) || defined(__clang__)
@@ -172,7 +187,7 @@ typedef struct GD32LA_PACKED {
 typedef struct GD32LA_PACKED {
     uint8_t  magic[4];       /* "GDLA" */
     uint8_t  version;        /* GD32LA_HDR_VERSION */
-    uint8_t  channels;       /* GD32LA_CHANNELS, logic channels */
+    uint8_t  channels;       /* digital channels, always 0 in v6 */
     uint16_t packet_size;    /* GD32LA_PACKET_SIZE */
     uint32_t samplerate;     /* Hz, echo of the START command */
     uint32_t flags;          /* bit0: ch1 phase shifted by 90 degrees */

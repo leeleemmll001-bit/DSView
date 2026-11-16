@@ -24,22 +24,23 @@
 #define INVALID_SOCKET      (-1)
 #endif
 
-/* Where the serial to Ethernet server listens. Override with the
- * GD32LA_HOST / GD32LA_PORT environment variables before starting DSView. */
+/* Where the two serial to Ethernet servers listen. Override with the
+ * GD32LA_HOST / GD32LA_PORT / GD32LA_PORT2 environment variables before
+ * starting DSView. The device sends the even frame numbers over the first
+ * link (USART2 on PB10/PB11) and the odd ones over the second (USART1 on
+ * PA2/PA3), both 1500000 8N1. */
 #define GD32LAN_DEFAULT_HOST        "192.168.1.100"
-#define GD32LAN_DEFAULT_PORT        "5000"
+#define GD32LAN_DEFAULT_PORT        "2404"
+#define GD32LAN_DEFAULT_PORT2       "2405"
 
-/* The serial link runs at 460800 8N1 = 46080 B/s gross, so the stream
- * ceilings of la_proto.h apply (GD32LA_UART_MAX_*). */
-#define GD32LAN_DEFAULT_SAMPLERATE  SR_KHZ(10)
-#define GD32LAN_DEFAULT_LIMIT       SR_KHZ(10)
-#define GD32LAN_DEFAULT_ASRATE      SR_KHZ(10)
-#define GD32LAN_DEFAULT_ALIMIT      SR_KHZ(10)
+/* The two serial links run at 2 x 1500000 8N1 = 300 kB/s gross, so the
+ * analog stream (rate * 32 B/s) tops out at GD32LA_UART_MAX_ANALOG_RATE. */
+#define GD32LAN_DEFAULT_ASRATE      SR_HZ(6400)
+#define GD32LAN_DEFAULT_ALIMIT      SR_KHZ(64)
 #define GD32LAN_MIN_SAMPLERATE      SR_KHZ(2)
 
 /* Reported hardware depth, bounds the sample limit DSView accepts. */
 #define GD32LAN_MAX_SAMPLES         SR_MHZ(64)
-#define GD32LAN_MAX_MIXED_SAMPLES   SR_MHZ(8)
 
 /* Polling interval of the session source that drains the receive queue. */
 #define GD32LAN_POLL_INTERVAL_MS    5
@@ -69,9 +70,11 @@ struct gd32lan_context {
     /* Back pointer, also the data feed destination. */
     struct sr_dev_inst *sdi;
 
-    /* Serial server to connect to, from GD32LA_HOST / GD32LA_PORT. */
+    /* Serial servers to connect to, from GD32LA_HOST / GD32LA_PORT /
+     * GD32LA_PORT2. */
     char host[64];
     char port[8];
+    char port2[8];
 
     uint64_t samplerate;
     uint64_t limit_samples;
@@ -81,27 +84,36 @@ struct gd32lan_context {
 
     guint8 channels_enabled;
 
-    /* Work mode of the running capture (GD32LA_MODE_*), derived from the
-     * enabled probes, not from sdi->mode. */
+    /* Work mode of the running capture, always GD32LA_MODE_ANALOG. */
     guint8 stream_mode;
-    guint8 logic_mask;      /* bit n: digital channel n is in the stream */
-    guint8 analog_mask;     /* bit n: analog channel n is in the stream */
 
     gboolean is_loop;
     gboolean abort;
     gboolean limit_reached;
     gboolean ended;
 
-    /* The TCP connection and the thread that pumps it into queue. */
+    /* The two TCP connections and the threads that pump them into the
+     * queues. Link 0 carries the even frame numbers, link 1 the odd ones. */
     SOCKET sock;
     GThread *rx_thread;
     GMutex queue_lock;
     GByteArray *queue;
-    volatile gboolean rx_done;   /* the link died or was shut down */
+    volatile gboolean rx_done;      /* link 0 died or was shut down */
 
-    /* Tail of a sample group that a recv chunk cut in half. */
-    guint8 carry[GD32LA_MIXED_GROUP_BYTES];
-    guint carry_len;
+    SOCKET sock2;
+    GThread *rx_thread2;
+    GByteArray *queue2;
+    volatile gboolean rx_done2;     /* link 1 died or was shut down */
+
+    /* Staging for the payload of the frame that is being forwarded. */
+    guint8 frame_buf[GD32LA_ANALOG_FRAME_BYTES - GD32LA_FRAME_HEADER_BYTES];
+
+    /* Sequence number bookkeeping of the frame merge, see
+     * lan_forward_frames(). */
+    uint32_t last_seq;
+    gboolean seq_valid;
+    gboolean link_warned;   /* one link died mid capture, warned once */
+    uint64_t frames_lost;
 
     /* Monotonic time of the last keepalive PING, see GD32LAN_KEEPALIVE_US. */
     gint64 last_ping_us;
