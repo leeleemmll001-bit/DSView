@@ -42,8 +42,11 @@ class AnalogSnapshot : public Snapshot
 public:
 	struct EnvelopeSample
 	{
-        uint8_t min;
-        uint8_t max;
+        /* 16 bit wide: a snapshot can carry up to 16 bit per sample, and a
+         * envelope built from the low byte alone turns the zoomed-out trace
+         * into noise. */
+        uint16_t min;
+        uint16_t max;
 	};
 
 	struct EnvelopeSection
@@ -54,6 +57,19 @@ public:
         uint64_t samples_num;
 		EnvelopeSample *samples;
 	};
+
+    /* One sample of the payload, little endian, of the current unit width.
+     * DSView stores what the driver hands over, so a device may report 8 or
+     * 16 bit samples; reading a single byte would clip the upper bits. */
+    uint16_t read_sample(const uint8_t *p) const
+    {
+        uint32_t v = p[0];
+
+        for (uint8_t i = 1; i < _unit_bytes; i++)
+            v |= (uint32_t)p[i] << (i * 8);
+
+        return (uint16_t)v;
+    }
 
 private:
 	struct Envelope

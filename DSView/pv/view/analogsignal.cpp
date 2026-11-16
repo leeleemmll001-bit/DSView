@@ -206,7 +206,8 @@ QPointF AnalogSignal::get_point(uint64_t index, float &value)
         return pt;
 
     const uint64_t ring_index = (uint64_t)(_data->get_ring_start() + floor(index)) % _data->get_sample_count();
-    value = *(_data->get_samples(ring_index) + order * _data->get_unit_bytes());
+    value = (float)_data->read_sample(_data->get_samples(ring_index) +
+                                      order * _data->get_unit_bytes());
 
     const int height = get_totalHeight();
     const float top = get_y() - height * 0.5;

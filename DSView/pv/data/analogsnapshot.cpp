@@ -305,12 +305,13 @@ void AnalogSnapshot::append_payload_to_envelope_levels()
             if (end_src_ptr >= (uint8_t*)_data + src_size)
                 end_src_ptr -= src_size;
             EnvelopeSample sub_sample;
-            sub_sample.min = *src_ptr;
-            sub_sample.max = *src_ptr;
+            sub_sample.min = read_sample(src_ptr);
+            sub_sample.max = sub_sample.min;
             src_ptr += _channel_num * _unit_bytes;
             while(src_ptr != end_src_ptr) {
-                sub_sample.min = min(sub_sample.min, *src_ptr);
-                sub_sample.max = max(sub_sample.max, *src_ptr);
+                const uint16_t v = read_sample(src_ptr);
+                sub_sample.min = min(sub_sample.min, v);
+                sub_sample.max = max(sub_sample.max, v);
                 src_ptr += _channel_num * _unit_bytes;
                 if (src_ptr >= (uint8_t*)_data + src_size)
                     src_ptr -= src_size;

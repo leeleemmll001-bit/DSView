@@ -47,12 +47,15 @@
 
     Analog sample layout
     --------------------
-    Plain interleaved bytes, one byte per channel per sample:
+    Plain interleaved samples, little endian, GD32LA_ANALOG_BYTES (2) bytes per
+    channel per sample, low byte first:
 
-      [ch0 sample n][ch1 sample n][ch0 sample n+1][ch1 sample n+1] ...
+      [ch0 sample n lo][ch0 sample n hi][ch1 sample n lo][ch1 sample n hi] ...
 
-    Values are unsigned 8 bit centred on GD32LA_ANALOG_MID (128), which is
-    what DSView's analog view expects from a 1 V/div, AC coupled probe.
+    Values are unsigned 16 bit centred on GD32LA_ANALOG_MID (32768), which is
+    what DSView's analog view expects from an AC coupled probe: it reads
+    (unit_bits + 7) / 8 bytes per sample with the low byte first and maps
+    0 .. 2^bits - 1 onto the full channel height.
 
     Mixed sample layout
     -------------------
@@ -104,14 +107,16 @@
 #define GD32LA_GROUP_BYTES             (GD32LA_CHANNELS * \
                                         GD32LA_BYTES_PER_CHANNEL)         /* 16 */
 
-/* Analog channel configuration */
+/* Analog channel configuration. 16 bit unsigned samples, little endian. */
 #define GD32LA_ANALOG_CHANNELS         2U
-#define GD32LA_ANALOG_BITS             8U
-#define GD32LA_ANALOG_MID              128U
-#define GD32LA_ANALOG_GROUP_BYTES      (GD32LA_ANALOG_CHANNELS * 1U)
+#define GD32LA_ANALOG_BITS             16U
+#define GD32LA_ANALOG_BYTES            ((GD32LA_ANALOG_BITS + 7U) / 8U)   /* 2 */
+#define GD32LA_ANALOG_MID              32768U
+#define GD32LA_ANALOG_GROUP_BYTES      (GD32LA_ANALOG_CHANNELS * \
+                                        GD32LA_ANALOG_BYTES)              /* 4 */
 
 /* Mixed group: one complete logic cross block followed by the analog samples
- * of the same 64 instants. 16 + 128 = 144 bytes per 64 samples. */
+ * of the same 64 instants. 16 + 4 * 64 = 272 bytes per 64 samples. */
 #define GD32LA_MIXED_GROUP_BYTES       (GD32LA_GROUP_BYTES + \
                                         GD32LA_ANALOG_GROUP_BYTES * \
                                         GD32LA_GROUP_SAMPLES)             /* 144 */
@@ -123,13 +128,13 @@
 
 /* Samplerate ceilings of the UART transport (460800 8N1 = 46080 B/s gross,
  * keep roughly 20% head room for the serial server and its buffers):
- *   logic  rate / 4 B/s    -> 128 kSa/s = 32 kB/s
- *   analog rate * 2 B/s    ->  18 kSa/s = 36 kB/s
- *   mixed  rate * 2.25 B/s ->  16 kSa/s = 36 kB/s
+ *   logic  rate / 4 B/s     -> 128 kSa/s = 32 kB/s
+ *   analog rate * 4 B/s     ->  10 kSa/s = 40 kB/s
+ *   mixed  rate * 4.25 B/s  ->  10 kSa/s = 42.5 kB/s
  * Both the firmware and the network driver clamp to these values. */
 #define GD32LA_UART_MAX_LOGIC_RATE     128000U
-#define GD32LA_UART_MAX_ANALOG_RATE    18000U
-#define GD32LA_UART_MAX_MIXED_RATE     16000U
+#define GD32LA_UART_MAX_ANALOG_RATE    10000U
+#define GD32LA_UART_MAX_MIXED_RATE     10000U
 
 /* Command ids */
 #define GD32LA_CMD_START               0x01U   /* arg = mode, value = samplerate */
@@ -145,7 +150,8 @@
 #define GD32LA_HDR_MAGIC1              'D'
 #define GD32LA_HDR_MAGIC2              'L'
 #define GD32LA_HDR_MAGIC3              'A'
-#define GD32LA_HDR_VERSION             4U
+/* 5: analog samples are 16 bit wide (2 bytes each) instead of 8 bit */
+#define GD32LA_HDR_VERSION             5U
 #define GD32LA_HDR_LEN                 20U
 
 #if defined(__GNUC__) || defined(__clang__)

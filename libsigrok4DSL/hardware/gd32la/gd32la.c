@@ -449,8 +449,11 @@ static void la_forward(struct gd32la_context *devc, struct libusb_transfer *tran
         for (i = 0; i < groups; i++) {
             const guint8 *grp = stream + i * GD32LA_ANALOG_GROUP_BYTES;
 
-            for (ch = 0; ch < GD32LA_ANALOG_CHANNELS; ch++)
-                *ap++ = grp[ch];
+            for (ch = 0; ch < GD32LA_ANALOG_CHANNELS; ch++) {
+                memcpy(ap, grp + ch * GD32LA_ANALOG_BYTES,
+                       GD32LA_ANALOG_BYTES);
+                ap += GD32LA_ANALOG_BYTES;
+            }
         }
 
         samples = groups;
@@ -496,7 +499,8 @@ static void la_forward(struct gd32la_context *devc, struct libusb_transfer *tran
     if (ap > analog_buf) {
         analog.probes = devc->sdi->channels;
         analog.num_samples = (uint64_t)((ap - analog_buf) /
-                                        GD32LA_ANALOG_CHANNELS);
+                                        (GD32LA_ANALOG_CHANNELS *
+                                         GD32LA_ANALOG_BYTES));
         analog.unit_bits = GD32LA_ANALOG_BITS;
         analog.unit_pitch = 0;
         analog.mq = SR_MQ_VOLTAGE;
@@ -736,8 +740,8 @@ static const GSList *hw_dev_mode_list(const struct sr_dev_inst *sdi)
     return l;
 }
 
-/* Describe the analog probe defaults: 8 bit samples centred on 128, 1 V/div,
- * AC coupling, -5 V .. +5 V display range. */
+/* Describe the analog probe defaults: 16 bit samples centred on 32768,
+ * 1 V/div, AC coupling, -5 V .. +5 V display range. */
 static void la_setup_analog_probe(struct sr_channel *probe)
 {
     probe->bits = GD32LA_ANALOG_BITS;
@@ -746,7 +750,8 @@ static void la_setup_analog_probe(struct sr_channel *probe)
     probe->vfactor = SR_mV(1);
     probe->hw_offset = GD32LA_ANALOG_MID;
     probe->offset = GD32LA_ANALOG_MID;
-    probe->trig_value = GD32LA_ANALOG_MID;
+    /* 8 bit trigger threshold register, triggers are not implemented. */
+    probe->trig_value = 0x80;
     probe->map_default = TRUE;
     probe->map_unit = map_units[0];
     probe->map_min = -5.0;

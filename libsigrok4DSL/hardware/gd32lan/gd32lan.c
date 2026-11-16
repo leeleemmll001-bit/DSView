@@ -65,7 +65,7 @@ static const char *analog_probe_names[] = {
 };
 
 /* Samplerates the 460800 baud serial link can carry, per stream format:
- * logic = rate / 4 B/s, analog = rate * 2 B/s, mixed = rate * 2.25 B/s. */
+ * logic = rate / 4 B/s, analog = rate * 4 B/s, mixed = rate * 4.25 B/s. */
 static const uint64_t logic_samplerates[] = {
     SR_KHZ(2),
     SR_KHZ(5),
@@ -81,17 +81,16 @@ static const uint64_t analog_samplerates[] = {
     SR_KHZ(2),
     SR_KHZ(5),
     SR_HZ(6400),
-    SR_KHZ(10),
-    SR_KHZ(16),
-    SR_KHZ(18),     /* 36 kB/s */
+    SR_KHZ(8),
+    SR_KHZ(10),     /* 40 kB/s */
 };
 
 static const uint64_t mixed_samplerates[] = {
     SR_KHZ(2),
     SR_KHZ(5),
     SR_HZ(6400),
-    SR_KHZ(10),
-    SR_KHZ(16),     /* 36 kB/s */
+    SR_KHZ(8),
+    SR_KHZ(10),     /* 42.5 kB/s */
 };
 
 static const int32_t probe_options[] = {
@@ -610,8 +609,11 @@ static void lan_forward(struct gd32lan_context *devc,
         for (i = 0; i < groups; i++) {
             const guint8 *grp = stream + i * GD32LA_ANALOG_GROUP_BYTES;
 
-            for (ch = 0; ch < GD32LA_ANALOG_CHANNELS; ch++)
-                *ap++ = grp[ch];
+            for (ch = 0; ch < GD32LA_ANALOG_CHANNELS; ch++) {
+                memcpy(ap, grp + ch * GD32LA_ANALOG_BYTES,
+                       GD32LA_ANALOG_BYTES);
+                ap += GD32LA_ANALOG_BYTES;
+            }
         }
 
         samples = groups;
@@ -656,7 +658,8 @@ static void lan_forward(struct gd32lan_context *devc,
     if (samples > 0 && ap > analog_buf) {
         analog.probes = devc->sdi->channels;
         analog.num_samples = (uint64_t)((ap - analog_buf) /
-                                        GD32LA_ANALOG_CHANNELS);
+                                        (GD32LA_ANALOG_CHANNELS *
+                                         GD32LA_ANALOG_BYTES));
         analog.unit_bits = GD32LA_ANALOG_BITS;
         analog.unit_pitch = 0;
         analog.mq = SR_MQ_VOLTAGE;
@@ -995,8 +998,8 @@ static const GSList *hw_dev_mode_list(const struct sr_dev_inst *sdi)
     return l;
 }
 
-/* Describe the analog probe defaults: 8 bit samples centred on 128, 1 V/div,
- * AC coupling, -5 V .. +5 V display range. */
+/* Describe the analog probe defaults: 16 bit samples centred on 32768,
+ * 1 V/div, AC coupling, -5 V .. +5 V display range. */
 static void lan_setup_analog_probe(struct sr_channel *probe)
 {
     probe->bits = GD32LA_ANALOG_BITS;
@@ -1005,7 +1008,9 @@ static void lan_setup_analog_probe(struct sr_channel *probe)
     probe->vfactor = SR_mV(1);
     probe->hw_offset = GD32LA_ANALOG_MID;
     probe->offset = GD32LA_ANALOG_MID;
-    probe->trig_value = GD32LA_ANALOG_MID;
+    /* The trigger threshold register is 8 bit wide and triggers are not
+     * implemented; keep it at mid scale so the dialog shows a sane value. */
+    probe->trig_value = 0x80;
     probe->map_default = TRUE;
     probe->map_unit = map_units[0];
     probe->map_min = -5.0;
