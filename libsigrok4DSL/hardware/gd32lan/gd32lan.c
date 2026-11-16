@@ -1173,6 +1173,17 @@ static int hw_dev_acquisition_start(struct sr_dev_inst *sdi, void *cb_data)
     devc->carry_len = 0;
     devc->keepalive_ticks = 0;
 
+    /* Drop whatever the receive thread collected after the last poll of the
+     * previous capture. Nobody consumed those bytes (the session source is
+     * removed at the end of a capture), and their length is arbitrary, so
+     * letting them head the next stream shifts the group boundary by a
+     * non-multiple of the group size. Every following group is then cut at
+     * the wrong offset and the whole capture is garbled, which is why the
+     * first capture looks fine and every later one does not. */
+    g_mutex_lock(&devc->queue_lock);
+    g_byte_array_set_size(devc->queue, 0);
+    g_mutex_unlock(&devc->queue_lock);
+
     ret = lan_pick_stream_mode(sdi);
     if (ret != SR_OK)
         return ret;
