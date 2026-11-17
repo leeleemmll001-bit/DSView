@@ -796,6 +796,10 @@ static int lan_start_link(struct gd32lan_context *devc)
     /* Stop whatever the device was doing and flush both serial servers, so
      * the header of the new stream is the first thing we read on each link. */
     lan_send_cmd(devc, GD32LA_CMD_STOP, 0, 0);
+    /* The device assembles one 8 byte command per millisecond tick and
+     * drops whatever arrives while a command is still pending, so the
+     * commands of one start sequence must not be sent back to back. */
+    g_usleep(20 * 1000);
     lan_drain(devc->sock);
     lan_drain(devc->sock2);
 
@@ -813,12 +817,14 @@ static int lan_start_link(struct gd32lan_context *devc)
             lan_send_cmd_fd(devc->sock2, GD32LA_CMD_SET_LIMIT, 0, limit) != SR_OK) {
             sr_err("Failed to program the capture limit.");
         }
+        g_usleep(20 * 1000);
     } else {
         /* real time streaming: no buffering on the device */
         if (lan_send_cmd_fd(devc->sock, GD32LA_CMD_SET_LIMIT, 0, 0) != SR_OK ||
             lan_send_cmd_fd(devc->sock2, GD32LA_CMD_SET_LIMIT, 0, 0) != SR_OK) {
             sr_err("Failed to clear the capture limit.");
         }
+        g_usleep(20 * 1000);
     }
 
     /* The device accepts START on either link and restarts both streams,
