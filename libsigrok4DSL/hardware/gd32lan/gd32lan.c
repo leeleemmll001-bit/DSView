@@ -66,7 +66,9 @@ static const char *analog_probe_names[] = {
  * analog = rate * 32 B/s (16 channels, 2 bytes each). */
 static const uint64_t analog_samplerates[] = {
     SR_KHZ(2),      /*  64 kB/s, 35% of the 184 kB/s a 921600 link carries */
-    SR_KHZ(5),      /* 160 kB/s, 87% - usable, occasional frame losses */
+    SR_KHZ(5),      /* 160 kB/s, 87% - real time, occasional frame losses */
+    SR_HZ(6400),    /* 204.8 kB/s against 184 kB/s: the device FIFO absorbs
+                     * the 10% deficit, a capture arrives slightly late */
 };
 
 static const int32_t probe_options[] = {

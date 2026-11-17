@@ -147,7 +147,7 @@
  *   analog rate * 32 B/s -> 6400 Sa/s = 204.8 kB/s (68%)
  * The logic / mixed ceilings belong to the legacy single link formats. */
 #define GD32LA_UART_MAX_LOGIC_RATE     128000U
-#define GD32LA_UART_MAX_ANALOG_RATE    5000U
+#define GD32LA_UART_MAX_ANALOG_RATE    6400U
 #define GD32LA_UART_MAX_MIXED_RATE     6400U
 
 /* Command ids */
