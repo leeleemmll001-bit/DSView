@@ -812,6 +812,13 @@ static int lan_start_link(struct gd32lan_context *devc)
     if (devc->samplerate >= SR_HZ(6400)) {
         uint32_t limit = 3U * (uint32_t)devc->samplerate;   /* 19200 samples */
 
+        /* Honour a shorter request from the application (the sampling bar
+         * offers whole seconds), the device can never buffer more than the
+         * 320 KiB per link allow anyway. */
+        if(devc->limit_samples > 0 && devc->limit_samples < limit) {
+            limit = (uint32_t)devc->limit_samples;
+        }
+
         devc->limit_samples = limit;
         if (lan_send_cmd_fd(devc->sock, GD32LA_CMD_SET_LIMIT, 0, limit) != SR_OK ||
             lan_send_cmd_fd(devc->sock2, GD32LA_CMD_SET_LIMIT, 0, limit) != SR_OK) {
