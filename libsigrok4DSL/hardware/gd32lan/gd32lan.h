@@ -29,7 +29,7 @@
  * starting DSView. The device sends the even frame numbers over the first
  * link (USART2 on PB10/PB11) and the odd ones over the second (USART1 on
  * PA2/PA3), both 1500000 8N1. */
-#define GD32LAN_DEFAULT_HOST        "192.168.1.100"
+#define GD32LAN_DEFAULT_HOST        "192.168.0.115"
 #define GD32LAN_DEFAULT_PORT        "2404"
 #define GD32LAN_DEFAULT_PORT2       "2405"
 
