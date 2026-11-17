@@ -157,6 +157,8 @@
                                                 * the host PINGs every 500 ms;
                                                 * the device stops streaming after
                                                 * 1.5 s without any RX byte */
+#define GD32LA_CMD_SET_LIMIT           0x05U   /* value: samples to buffer
+                                                * before streaming, 0 = real time */
 #define GD32LA_CMD_SET_PHASE           0x04U   /* arg: 0 = ch1 90 deg, 1 = ch1 in phase */
 
 /* Header packet magic */

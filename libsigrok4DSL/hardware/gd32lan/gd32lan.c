@@ -799,6 +799,28 @@ static int lan_start_link(struct gd32lan_context *devc)
     lan_drain(devc->sock);
     lan_drain(devc->sock2);
 
+    /* At 6400 Hz the two 921600 links cannot carry the 204.8 kB/s stream in
+     * real time (they top out at 184.3 kB/s), so the device is told to
+     * buffer a whole capture in its SRAM first and stream it out after the
+     * last sample. Three seconds fit in the 320 KiB per link the firmware
+     * reserves; the capture then completes about 5 s later in wall clock
+     * time while the sample axis stays correct. */
+    if (devc->samplerate >= SR_HZ(6400)) {
+        uint32_t limit = 3U * (uint32_t)devc->samplerate;   /* 19200 samples */
+
+        devc->limit_samples = limit;
+        if (lan_send_cmd_fd(devc->sock, GD32LA_CMD_SET_LIMIT, 0, limit) != SR_OK ||
+            lan_send_cmd_fd(devc->sock2, GD32LA_CMD_SET_LIMIT, 0, limit) != SR_OK) {
+            sr_err("Failed to program the capture limit.");
+        }
+    } else {
+        /* real time streaming: no buffering on the device */
+        if (lan_send_cmd_fd(devc->sock, GD32LA_CMD_SET_LIMIT, 0, 0) != SR_OK ||
+            lan_send_cmd_fd(devc->sock2, GD32LA_CMD_SET_LIMIT, 0, 0) != SR_OK) {
+            sr_err("Failed to clear the capture limit.");
+        }
+    }
+
     /* The device accepts START on either link and restarts both streams,
      * so both links get the command and answer with the header. */
     if (lan_send_cmd_fd(devc->sock, GD32LA_CMD_START, devc->stream_mode,
