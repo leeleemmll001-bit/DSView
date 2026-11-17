@@ -35,7 +35,7 @@
 
 /* The two serial links run at 2 x 1500000 8N1 = 300 kB/s gross, so the
  * analog stream (rate * 32 B/s) tops out at GD32LA_UART_MAX_ANALOG_RATE. */
-#define GD32LAN_DEFAULT_ASRATE      SR_HZ(6400)
+#define GD32LAN_DEFAULT_ASRATE      SR_HZ(2000)
 #define GD32LAN_DEFAULT_ALIMIT      SR_KHZ(64)
 #define GD32LAN_MIN_SAMPLERATE      SR_KHZ(2)
 

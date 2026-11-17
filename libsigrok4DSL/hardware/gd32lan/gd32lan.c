@@ -65,9 +65,8 @@ static const char *analog_probe_names[] = {
 /* Samplerates the two 1500000 baud serial links can carry:
  * analog = rate * 32 B/s (16 channels, 2 bytes each). */
 static const uint64_t analog_samplerates[] = {
-    SR_KHZ(2),      /*  64 kB/s */
-    SR_KHZ(5),      /* 160 kB/s */
-    SR_HZ(6400),    /* 204.8 kB/s, 68% of the 300 kB/s available */
+    SR_KHZ(2),      /*  64 kB/s, 35% of the 184 kB/s a 921600 link carries */
+    SR_KHZ(5),      /* 160 kB/s, 87% - usable, occasional frame losses */
 };
 
 static const int32_t probe_options[] = {
