@@ -90,7 +90,7 @@ enum {
 };
 
 #define SR_MAX_PROBENAME_LEN 32
-#define DS_MAX_ANALOG_PROBES_NUM 4
+#define DS_MAX_ANALOG_PROBES_NUM 16
 #define DS_MAX_DSO_PROBES_NUM 2
 
 #define TriggerStages 16
